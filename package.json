@@ -1,0 +1,12 @@
+{
+  "name": "cc-rsi",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "smoke": "CC_RSI_E2E=1 node scripts/run-tests.mjs test/e2e"
+  }
+}

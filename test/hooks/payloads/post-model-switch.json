@@ -1,0 +1,1 @@
+{"session_id": "__SID__", "transcript_path": "__HOME__/transcript.jsonl", "cwd": "__CWD__", "hook_event_name": "PostModelSwitch", "from_model": "claude-sonnet-4-6", "to_model": "claude-opus-5"}

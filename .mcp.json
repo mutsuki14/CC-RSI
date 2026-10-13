@@ -1,0 +1,3 @@
+{"mcpServers": {"rsi": {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.mjs"], "timeout": 600000, "alwaysLoad": true,
+  "env": {"CC_RSI_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}", "CC_RSI_OPT_VERIFIER_MODEL": "${user_config.verifier_model}",
+          "CC_RSI_OPT_STOP_POLICY": "${user_config.stop_policy}", "CC_RSI_OPT_SANDBOX": "${user_config.sandbox}"}}}}

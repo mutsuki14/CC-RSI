@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+'use strict';
+// cc-rsi command-line entry (SPEC §13.2). CommonJS on purpose: package.json has no "type" field,
+// so this extensionless file loads as CommonJS on every Node >= 18 and imports the ESM CLI (J2-11).
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+if (Number(process.versions.node.split('.')[0]) < 18) { process.stderr.write('cc-rsi requires Node >= 18\n'); process.exit(1); }
+if (process.env.CC_RSI_ROLE) { process.stderr.write('cc-rsi: refusing to run inside a cc-rsi role context (CC_RSI_ROLE is set)\n'); process.exit(64); }
+import(pathToFileURL(path.join(__dirname, '..', 'lib', 'cli', 'main.mjs')).href)
+  .then((m) => m.main(process.argv.slice(2)))
+  .then((code) => { process.exitCode = typeof code === 'number' ? code : 0; },
+        (err) => { process.stderr.write(String((err && err.stack) || err) + '\n'); process.exitCode = 1; });

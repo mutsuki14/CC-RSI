@@ -1,0 +1,19 @@
+{
+  "name": "cc-rsi",
+  "displayName": "cc-rsi — recursive self-improvement",
+  "version": "0.1.0",
+  "description": "RSIAgent-style recursive self-improvement for Claude Code: an independent headless Verifier for your work, Actor-owned verified experience memory, and background Curriculum-driven exploration lineages (broad waves, deep target/practice, frozen reuse with sealed evaluation).",
+  "author": {"name": "mutsuki14", "url": "https://github.com/mutsuki14"},
+  "homepage": "https://github.com/mutsuki14/CC-RSI",
+  "repository": "https://github.com/mutsuki14/CC-RSI",
+  "license": "Apache-2.0",
+  "keywords": ["self-improvement", "verifier", "memory", "curriculum", "rsi", "rsiagent"],
+  "userConfig": {
+    "verifier_model": {"type": "string", "title": "Verifier model",
+      "description": "Alias (opus, sonnet, haiku, fable) or full model id for the independent Verifier. Empty: the session's model.", "default": ""},
+    "stop_policy": {"type": "string", "title": "Stop policy", "options": ["off", "nudge", "gate"], "default": "nudge",
+      "description": "off: never remind. nudge: remind once before finishing unverified or unlearned work. gate: block finishing unverified work up to 3 times."},
+    "sandbox": {"type": "string", "title": "OS sandbox for role children", "options": ["auto", "require", "off"], "default": "auto",
+      "description": "auto: use the Claude Code sandbox when it works, otherwise degrade explicitly (shown at session start). require: refuse to run Verifier and lineage children without it. off: never use it."}
+  }
+}

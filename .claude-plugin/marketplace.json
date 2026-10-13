@@ -1,0 +1,3 @@
+{"name": "cc-rsi", "owner": {"name": "mutsuki14", "url": "https://github.com/mutsuki14"},
+ "description": "Single-plugin marketplace for cc-rsi.",
+ "plugins": [{"name": "cc-rsi", "source": "./", "description": "Independent Verifier, verified experience memory and exploration lineages for Claude Code (after RSIAgent)."}]}

@@ -1,0 +1,15 @@
+{
+  "description": "cc-rsi: RSI protocol for the main (Actor) session — protocol context, verbatim request capture, private-path guard, verification lock, MCP attestation, verdict wake-up, stop policy",
+  "hooks": {
+    "SessionStart": [{"matcher": "startup|resume|clear|compact|fork", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "session-start"], "timeout": 20}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "prompt"], "timeout": 15}]}],
+    "PreToolUse": [
+      {"matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "guard"], "timeout": 10}]},
+      {"matcher": "^mcp__plugin_cc-rsi_rsi__", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "attest"], "timeout": 10}]}
+    ],
+    "PostToolUse": [{"matcher": "^mcp__plugin_cc-rsi_rsi__(submit|wait_verdict)$", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "rewake"], "timeout": 7200, "asyncRewake": true}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "stop"], "timeout": 15}]}],
+    "PostModelSwitch": [{"hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "model"], "timeout": 10}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "session-end"], "timeout": 1}]}]
+  }
+}
