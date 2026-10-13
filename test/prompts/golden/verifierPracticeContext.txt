@@ -1,0 +1,6 @@
+===== phase1 =====
+The candidate project is a fresh copy of the captured candidate at the candidate root. Actor-private memory, handoff prose, reasoning, and execution logs are hidden by the harness. Investigate the actual candidate independently.
+===== phase2 =====
+The candidate project is a fresh copy of the captured candidate at the candidate root. The frozen original input fixture is the read-only original-fixtures view named in this message; use it only as pre-candidate evidence. Actor-private memory, handoff prose, and execution logs are hidden by the harness.
+===== phase2-evidence =====
+The candidate project is a fresh copy of the captured candidate at the candidate root. The frozen original input fixture is the read-only original-fixtures view named in this message; use it only as pre-candidate evidence. Actor-private memory, handoff prose, and execution logs are hidden by the harness. This inspection continues the same Verifier conversation on a fresh copy of the captured candidate. Previous private scratch files are absent; re-establish probes against the current candidate and original fixtures.

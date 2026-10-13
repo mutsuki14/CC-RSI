@@ -1,0 +1,1 @@
+The candidate project is a fresh copy of the captured candidate at the candidate root. The frozen original input fixture is the read-only original-fixtures view named in this message; use it only as pre-candidate evidence. Actor-private memory, handoff prose, and execution logs are hidden by the harness.

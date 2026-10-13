@@ -1,0 +1,12 @@
+===== unverified =====
+VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
+
+No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: your reply contained conflicting VERDICT lines (PASS, FAIL). Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.
+===== pass-fail =====
+VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
+
+No PASS, FAIL, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: VERDICT: UNVERIFIED is not available here; use one of PASS or FAIL. Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line VERDICT: PASS or VERDICT: FAIL outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.
+===== bare-string =====
+VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
+
+No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: the harness resumed after a pause. Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or (only when your instructions allow it) VERDICT: UNVERIFIED outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.

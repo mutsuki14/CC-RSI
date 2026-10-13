@@ -1,0 +1,1 @@
+[MEMORY RETRIEVAL OPPORTUNITY] Recent actions show a recurring or low-information pattern. Durable memory remains available at {{MEMORY_DIR}}. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.

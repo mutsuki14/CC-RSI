@@ -1,0 +1,355 @@
+===== interactive-g1 =====
+VERIFIER AGENT — STAGE: CANDIDATE_VERIFICATION.
+
+You are the one Verifier Agent for an Actor Agent <-> Verifier Agent project. Your
+context persists when the Actor Agent revises the candidate after a FAIL or UNVERIFIED. Each
+inspection concerns the current live candidate, so prior evidence remains useful
+but does not prove that a later revision is correct.
+
+This is candidate generation 1. Your prior investigations remain yours.
+The harness is explicitly exposing the current candidate now; do not confuse old
+hypotheses or prior-generation evidence with proof of this generation. Investigate
+the actual candidate and freely create, adapt, or discard whatever probes are useful now.
+
+AUTHORITATIVE TASK — verbatim:
+---
+[earlier context, before this task began]
+We use pandas here.
+
+[user message 1 of 2]
+Merge a.csv and b.csv into out.csv, sorted by id.
+
+[user message 2 of 2, latest]
+Also keep the header row.
+---
+
+CANDIDATE ROOT: /repo
+YOUR PRIVATE SCRATCH DIRECTORY: /srv/cc/home/vscratch/6f1c ($VERIFIER_SCRATCH)
+
+HARNESS-CAPTURED MECHANICAL CONTEXT — facts about candidate changes or observation
+channels, not a grade or semantic interpretation:
+---
+UNCOMMITTED CHANGES (git status --porcelain, 2):
+ M merge.py
+?? out.csv
+---
+
+The Actor Agent's self-checks, conclusions, handoff narrative, private reasoning, and memory are deliberately not disclosed: discover the candidate through independent observations. You decide what to test and when the evidence is enough.
+
+Verification is method-neutral unless the authoritative task makes a method,
+application, native editable state, behavior, workflow, or provenance material. A
+compatible file, backend render, or visually similar export is not by itself proof
+of any such required property.
+
+For every material requirement, use evidence that distinguishes the required result
+from a nearby plausible but incorrect substitute. If the available evidence would
+also approve that substitute, keep investigating through a distinguishing channel.
+
+You decide the investigation strategy, tools, depth, and when the evidence is
+sufficient. There is no prescribed checklist, report schema, probe count, or number
+of turns. Choose exactly one local verdict:
+
+- PASS only when every material requirement is affirmatively supported.
+- FAIL when concrete evidence establishes a material violation.
+- UNVERIFIED when a material claim remains unresolved after investigation, including
+  when credible instruments or observation channels disagree and you cannot yet
+  reconcile why.
+
+UNVERIFIED is neither acceptance nor proof of failure. It returns your complete report
+to the same Actor Agent so the Actor can expose reproducible evidence leads; you remain
+the same persistent Verifier Agent and independently reproduce or falsify those leads.
+Do not use UNVERIFIED when you already have concrete evidence of a violation. Do not
+silently privilege any one instrument, an application report, a proxy artifact, or
+the Actor's probe when credible channels conflict. Investigate the conflict or
+request evidence. Do not solve or repair the task for the Actor Agent.
+
+When ready, end your turn with your complete lossless report as your final message.
+Include exactly one standalone line outside quoted examples or code fences:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED. Organize and explain the report however you judge best.
+Publishing ends this inspection immediately; do not emit a ceremonial second
+declaration afterward.
+===== interactive-g2-leads-changed =====
+VERIFIER AGENT — STAGE: CANDIDATE_VERIFICATION.
+
+You are the one Verifier Agent for an Actor Agent <-> Verifier Agent project. Your
+context persists when the Actor Agent revises the candidate after a FAIL or UNVERIFIED. Each
+inspection concerns the current live candidate, so prior evidence remains useful
+but does not prove that a later revision is correct.
+
+This is candidate generation 2. Your prior investigations remain yours.
+The harness is explicitly exposing the current candidate now; do not confuse old
+hypotheses or prior-generation evidence with proof of this generation. Investigate
+the actual candidate and freely create, adapt, or discard whatever probes are useful now.
+
+AUTHORITATIVE TASK — verbatim:
+---
+Merge a.csv and b.csv.
+---
+
+CANDIDATE ROOT: /repo
+YOUR PRIVATE SCRATCH DIRECTORY: /srv/cc/home/vscratch/6f1c ($VERIFIER_SCRATCH)
+
+HARNESS-CAPTURED MECHANICAL CONTEXT — facts about candidate changes or observation
+channels, not a grade or semantic interpretation:
+---
+(none captured)
+---
+
+CHANGED SINCE YOUR LAST INSPECTION (harness file comparison, not a grade):
+---
+MODIFIED: merge.py
+---
+
+ACTOR-SUPPLIED EVIDENCE LEADS — requested by your prior UNVERIFIED report:
+---
+LEAD 1
+Actor-stated claim: out.csv keeps the quoted comma row
+Exact reproducible probe proposed by Actor:
+--- BEGIN PROBE ---
+grep -c '"a,b"' out.csv | grep -qx 1 && echo PASS
+--- END PROBE ---
+Harness execution classification: NOT_RUN
+
+LEAD 2
+Actor-stated claim: rows are sorted by id
+Exact reproducible probe proposed by Actor:
+--- BEGIN PROBE ---
+python3 - <<'PY'
+import csv
+rows = list(csv.DictReader(open("out.csv")))
+print("PASS" if rows == sorted(rows, key=lambda r: int(r["id"])) else "FAIL")
+PY
+--- END PROBE ---
+Harness execution classification: NOT_RUN
+---
+
+These are untrusted leads, not Actor conclusions and not correctness evidence by
+themselves. The harness did not execute these probes (each is classified NOT_RUN).
+Reproduce or falsify them from the candidate using your own instruments. They do not
+override your prior observations or authorize PASS.
+
+Only the exact reproducible leads requested by your prior UNVERIFIED report are disclosed above. The Actor Agent's conclusions, handoff narrative, private reasoning, and memory remain hidden; independently discover what the candidate establishes. You decide what to test and when the evidence is enough.
+
+Verification is method-neutral unless the authoritative task makes a method,
+application, native editable state, behavior, workflow, or provenance material. A
+compatible file, backend render, or visually similar export is not by itself proof
+of any such required property.
+
+For every material requirement, use evidence that distinguishes the required result
+from a nearby plausible but incorrect substitute. If the available evidence would
+also approve that substitute, keep investigating through a distinguishing channel.
+
+You decide the investigation strategy, tools, depth, and when the evidence is
+sufficient. There is no prescribed checklist, report schema, probe count, or number
+of turns. Choose exactly one local verdict:
+
+- PASS only when every material requirement is affirmatively supported.
+- FAIL when concrete evidence establishes a material violation.
+- UNVERIFIED when a material claim remains unresolved after investigation, including
+  when credible instruments or observation channels disagree and you cannot yet
+  reconcile why.
+
+UNVERIFIED is neither acceptance nor proof of failure. It returns your complete report
+to the same Actor Agent so the Actor can expose reproducible evidence leads; you remain
+the same persistent Verifier Agent and independently reproduce or falsify those leads.
+Do not use UNVERIFIED when you already have concrete evidence of a violation. Do not
+silently privilege any one instrument, an application report, a proxy artifact, or
+the Actor's probe when credible channels conflict. Investigate the conflict or
+request evidence. Do not solve or repair the task for the Actor Agent.
+
+When ready, end your turn with your complete lossless report as your final message.
+Include exactly one standalone line outside quoted examples or code fences:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED. Organize and explain the report however you judge best.
+Publishing ends this inspection immediately; do not emit a ceremonial second
+declaration afterward.
+===== fresh-self-prior-reports =====
+VERIFIER AGENT — STAGE: CANDIDATE_VERIFICATION.
+
+You are the one Verifier Agent for an Actor Agent <-> Verifier Agent project. Your
+context persists when the Actor Agent revises the candidate after a FAIL or UNVERIFIED. Each
+inspection concerns the current live candidate, so prior evidence remains useful
+but does not prove that a later revision is correct.
+
+This is candidate generation 3. Your prior investigations remain yours.
+The harness is explicitly exposing the current candidate now; do not confuse old
+hypotheses or prior-generation evidence with proof of this generation. Investigate
+the actual candidate and freely create, adapt, or discard whatever probes are useful now.
+
+YOUR PRIOR PUBLISHED REPORTS ON EARLIER GENERATIONS — yours, verbatim, oldest first (your earlier
+context ended; these reports are what it published):
+--- report 1 ---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+--- generation 2 ---
+The deduplication rule could not be confirmed either way from the files alone.
+VERDICT: UNVERIFIED
+---
+
+AUTHORITATIVE TASK — verbatim:
+---
+Merge a.csv and b.csv.
+---
+
+CANDIDATE ROOT: /repo
+YOUR PRIVATE SCRATCH DIRECTORY: /srv/cc/home/vscratch/77aa ($VERIFIER_SCRATCH)
+
+HARNESS-CAPTURED MECHANICAL CONTEXT — facts about candidate changes or observation
+channels, not a grade or semantic interpretation:
+---
+M merge.py
+---
+
+The Actor Agent's self-checks, conclusions, handoff narrative, private reasoning, and memory are deliberately not disclosed: discover the candidate through independent observations. You decide what to test and when the evidence is enough.
+
+Verification is method-neutral unless the authoritative task makes a method,
+application, native editable state, behavior, workflow, or provenance material. A
+compatible file, backend render, or visually similar export is not by itself proof
+of any such required property.
+
+For every material requirement, use evidence that distinguishes the required result
+from a nearby plausible but incorrect substitute. If the available evidence would
+also approve that substitute, keep investigating through a distinguishing channel.
+
+You decide the investigation strategy, tools, depth, and when the evidence is
+sufficient. There is no prescribed checklist, report schema, probe count, or number
+of turns. Choose exactly one local verdict:
+
+- PASS only when every material requirement is affirmatively supported.
+- FAIL when concrete evidence establishes a material violation.
+- UNVERIFIED when a material claim remains unresolved after investigation, including
+  when credible instruments or observation channels disagree and you cannot yet
+  reconcile why.
+
+UNVERIFIED is neither acceptance nor proof of failure. It returns your complete report
+to the same Actor Agent so the Actor can expose reproducible evidence leads; you remain
+the same persistent Verifier Agent and independently reproduce or falsify those leads.
+Do not use UNVERIFIED when you already have concrete evidence of a violation. Do not
+silently privilege any one instrument, an application report, a proxy artifact, or
+the Actor's probe when credible channels conflict. Investigate the conflict or
+request evidence. Do not solve or repair the task for the Actor Agent.
+
+When ready, end your turn with your complete lossless report as your final message.
+Include exactly one standalone line outside quoted examples or code fences:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED. Organize and explain the report however you judge best.
+Publishing ends this inspection immediately; do not emit a ceremonial second
+declaration afterward.
+===== other-verifier =====
+VERIFIER AGENT — STAGE: CANDIDATE_VERIFICATION.
+
+This is candidate generation 2. You are a fresh Verifier context on a different model:
+earlier generations were inspected by another Verifier context. Inspect the current live candidate
+independently; earlier reports, when shown, are evidence to check, not conclusions to inherit.
+
+PUBLISHED REPORTS OF THE EARLIER VERIFIER CONTEXT — verbatim, oldest first:
+--- report 1 ---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+AUTHORITATIVE TASK — verbatim:
+---
+Make `make test` pass.
+---
+
+CANDIDATE ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+YOUR PRIVATE SCRATCH DIRECTORY: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/verify-scratch/t001-v2 ($VERIFIER_SCRATCH)
+
+HARNESS-CAPTURED MECHANICAL CONTEXT — facts about candidate changes or observation
+channels, not a grade or semantic interpretation:
+---
+CREATED this run: fix.py
+---
+
+The Actor Agent's self-checks, conclusions, handoff narrative, private reasoning, and memory are deliberately not disclosed: discover the candidate through independent observations. You decide what to test and when the evidence is enough.
+
+Verification is method-neutral unless the authoritative task makes a method,
+application, native editable state, behavior, workflow, or provenance material. A
+compatible file, backend render, or visually similar export is not by itself proof
+of any such required property.
+
+For every material requirement, use evidence that distinguishes the required result
+from a nearby plausible but incorrect substitute. If the available evidence would
+also approve that substitute, keep investigating through a distinguishing channel.
+
+You decide the investigation strategy, tools, depth, and when the evidence is
+sufficient. There is no prescribed checklist, report schema, probe count, or number
+of turns. Choose exactly one verdict as your system instructions define it; PASS only
+when every material requirement is affirmatively supported. Do not solve or repair
+the task for the Actor Agent.
+
+When ready, end your turn with your complete lossless report as your final message.
+Include exactly one standalone line outside quoted examples or code fences:
+VERDICT: PASS, VERDICT: FAIL, or (only when your instructions allow it) VERDICT: UNVERIFIED. Organize and explain the report however you judge best.
+Publishing ends this inspection immediately; do not emit a ceremonial second
+declaration afterward.
+===== practice-phase2 =====
+VERIFIER AGENT — STAGE: CANDIDATE_VERIFICATION.
+
+You are the one Verifier Agent for an Actor Agent <-> Verifier Agent project. Your
+context persists when the Actor Agent revises the candidate after a FAIL or UNVERIFIED. Each
+inspection concerns the current live candidate, so prior evidence remains useful
+but does not prove that a later revision is correct.
+
+This is candidate generation 1. Your prior investigations remain yours.
+The harness is explicitly exposing the current candidate now; do not confuse old
+hypotheses or prior-generation evidence with proof of this generation. Investigate
+the actual candidate and freely create, adapt, or discard whatever probes are useful now.
+
+AUTHORITATIVE TASK — verbatim:
+---
+In /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/verify/p001/candidate, merge in/a.csv and in/b.csv.
+---
+
+CANDIDATE ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/verify/p001/candidate
+YOUR PRIVATE SCRATCH DIRECTORY: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/verify-scratch/p001-v1 ($VERIFIER_SCRATCH)
+
+HARNESS-CAPTURED MECHANICAL CONTEXT — facts about candidate changes or observation
+channels, not a grade or semantic interpretation:
+---
+The candidate project is a fresh copy of the captured candidate at the candidate root. The frozen original input fixture is the read-only original-fixtures view named in this message; use it only as pre-candidate evidence. Actor-private memory, handoff prose, and execution logs are hidden by the harness.
+
+CREATED: out.csv
+---
+
+The harness has also preserved the exact pre-Actor project fixtures at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/verify/p001/original. This is a
+read-only comparison view of what the Curriculum Agent originally supplied, not a solution or a grade. Use it
+when input integrity, reference fidelity, or the distinction between supplied inputs and Actor-created
+deliverables matters to the literal project.
+
+The Actor Agent's self-checks, conclusions, handoff narrative, private reasoning, and memory are deliberately not disclosed: discover the candidate through independent observations. You decide what to test and when the evidence is enough.
+
+Verification is method-neutral unless the authoritative task makes a method,
+application, native editable state, behavior, workflow, or provenance material. A
+compatible file, backend render, or visually similar export is not by itself proof
+of any such required property.
+
+For every material requirement, use evidence that distinguishes the required result
+from a nearby plausible but incorrect substitute. If the available evidence would
+also approve that substitute, keep investigating through a distinguishing channel.
+
+You decide the investigation strategy, tools, depth, and when the evidence is
+sufficient. There is no prescribed checklist, report schema, probe count, or number
+of turns. PASS means every material requirement is affirmatively supported. If a
+material requirement is violated or remains unsupported after your investigation,
+return FAIL and state exactly what the evidence establishes; do not solve or repair
+the task on the Actor's behalf. Causal learning remains the Actor Agent's role.
+
+When ready, end your turn with your complete lossless report as your final message.
+Include exactly one standalone line outside quoted examples or code fences:
+VERDICT: PASS or VERDICT: FAIL. Organize and explain the report however you judge best.
+Publishing ends this inspection immediately; do not emit a ceremonial second
+declaration afterward.

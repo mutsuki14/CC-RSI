@@ -1,0 +1,1 @@
+Error: sandbox required but unavailable: sandbox is enabled but dependencies are missing: bubblewrap (bwrap) not installed, socat not installed. sandbox.failIfUnavailable is set — refusing to start without a working sandbox.

@@ -1,0 +1,6 @@
+{"ts":"2026-10-13T19:55:55.429Z","pid":24299,"hook":"prompt","decision":"pass","digest":"d0d85955e21cc3864a69956b01581adc2233fab63302113bbb1a722e5f8cc97b"}
+{"ts":"2026-10-13T19:55:57.101Z","pid":24309,"hook":"tool","toolUseId":"toolu_01Q2vTiMPCTSyt8PouFLV21y","tool":"Bash","decision":"pass"}
+{"ts":"2026-10-13T19:55:57.222Z","pid":24343,"hook":"post","toolUseId":"toolu_01Q2vTiMPCTSyt8PouFLV21y","tool":"Bash","repeat":false}
+{"ts":"2026-10-13T19:55:58.834Z","pid":24350,"hook":"tool","toolUseId":"toolu_01WGT8X1Zdg5yceBdhZnH8Y5","tool":"Bash","decision":"pass"}
+{"ts":"2026-10-13T19:55:58.909Z","pid":24358,"hook":"post","toolUseId":"toolu_01WGT8X1Zdg5yceBdhZnH8Y5","tool":"Bash","repeat":false}
+{"ts":"2026-10-13T19:56:01.942Z","pid":24365,"hook":"tool","toolUseId":"toolu_01TjPc6LbcPcgCBcVkFYo4Dk","tool":"Write","decision":"pass"}

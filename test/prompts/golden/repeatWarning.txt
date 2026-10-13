@@ -1,0 +1,2 @@
+===== default =====
+WARNING: you ran the IDENTICAL command as last turn and its output is unchanged — repetition gathers nothing. Either change the command (fix the cause, or wait and recheck INSIDE one command), or, if the end state already exists, end your turn with your terminal handoff NOW.

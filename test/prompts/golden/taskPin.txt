@@ -1,0 +1,13 @@
+===== single =====
+TASK (verbatim, unchanged — this is the actual goal):
+Fix the CSV merger in this repo.
+===== several =====
+TASK (verbatim, unchanged — this is the actual goal):
+[earlier context, before this task began]
+We use pandas here.
+
+[user message 1 of 2]
+Merge a.csv and b.csv into out.csv, sorted by id.
+
+[user message 2 of 2, latest]
+Also keep the header row.

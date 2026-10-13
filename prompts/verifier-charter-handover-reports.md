@@ -1,0 +1,3 @@
+PUBLISHED REPORTS OF THE EARLIER VERIFIER CONTEXT — verbatim, oldest first:
+{{REPORTS}}
+---

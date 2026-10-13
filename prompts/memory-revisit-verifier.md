@@ -1,0 +1,1 @@
+[MEMORY RETRIEVAL OPPORTUNITY] The Verifier Agent has provided new evidence about the current candidate. Durable memory remains available at {{MEMORY_DIR}}. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.

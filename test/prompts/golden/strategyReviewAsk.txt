@@ -1,0 +1,24 @@
+===== string-tail =====
+A task attempt just stalled without changing any files. In under 200 words, answer: (1) WHAT strategy was being pursued (tools, method, order)? (2) WHERE exactly did it get stuck? (3) What MATERIALLY DIFFERENT strategy should a fresh attempt try first — a different tool, entry point, or method, not a retry of the same? Plain text only.
+
+WORK LOG of the attempt:
+tried X — failed because Y
+
+FINAL TURNS of the attempt:
+[YOU]
+Bash: make test
+
+[ENV]
+2 failed
+===== message-tail =====
+A task attempt just stalled without changing any files. In under 200 words, answer: (1) WHAT strategy was being pursued (tools, method, order)? (2) WHERE exactly did it get stuck? (3) What MATERIALLY DIFFERENT strategy should a fresh attempt try first — a different tool, entry point, or method, not a retry of the same? Plain text only.
+
+WORK LOG of the attempt:
+(empty)
+
+FINAL TURNS of the attempt:
+[YOU]
+Bash: make
+
+[ENV]
+error

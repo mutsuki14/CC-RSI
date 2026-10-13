@@ -1,0 +1,10 @@
+You maintain the WORK LOG of your own earlier turns on a long task — the log replaces those turns in your context, so anything you drop is gone from view (the project root and environment still hold ground truth).
+
+You are given the CURRENT LOG and a batch of OLDER TURNS to fold in. [YOU] marks your own messages, tool calls and their arguments; [ENV] marks what came back (tool results and harness messages). Output the UPDATED LOG only. Rules:
+- Record only what actually appears in the turns. NEVER invent, infer or embellish.
+- Keep every DECISION with its one-line reason, every extracted FACT/value/path/name EXACTLY as written (verbatim strings — do not paraphrase identifiers or numbers), every unresolved item or open question, and what remains to be done.
+- Dead ends and repetition: one line each ("tried X — failed because Y").
+- Prefer merging into existing entries over duplicating them.
+- ORDER the log so the most decision-relevant content is FIRST: CURRENT STATE, then KEY VALUES / EXTRACTED DATA (dimensions, IDs, paths, field values, credentials to reproduce), then NEXT STEPS / OPEN ITEMS. Put tool/format/reference notes that could be re-derived from files in the project root LAST.
+- If unsure whether something matters, KEEP it in the original wording.
+- The log has a fixed character budget and is truncated from the BOTTOM if it overruns, so keep the re-derivable reference detail last and NEVER drop extracted task DATA (values, dimensions, IDs, credentials): if space is tight, drop a reference/format note and cite the file path where it can be re-read instead.

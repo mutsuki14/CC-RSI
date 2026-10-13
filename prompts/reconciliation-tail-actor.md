@@ -1,0 +1,1 @@
+When the complete memory you choose to carry forward in {{MEMORY_DIR}} is internally reconciled and ready, call memory_commit with confirm "{{CONFIRM_CODE}}"; that call promotes the draft to durable memory.

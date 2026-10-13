@@ -1,0 +1,1 @@
+This inspection continues the same Verifier conversation on a fresh copy of the captured candidate. Previous private scratch files are absent; re-establish probes against the current candidate and original fixtures.

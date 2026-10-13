@@ -1,0 +1,22 @@
+===== messages =====
+CURRENT LOG:
+(empty)
+
+OLDER TURNS TO FOLD IN:
+[YOU]
+Bash: ls in/
+
+[ENV]
+a.csv
+b.csv
+
+Output the updated log only.
+===== with-log =====
+CURRENT LOG:
+CURRENT STATE: listing done.
+
+OLDER TURNS TO FOLD IN:
+[YOU]
+Read in/a.csv
+
+Output the updated log only.

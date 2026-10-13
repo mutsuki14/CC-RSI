@@ -1,0 +1,76 @@
+===== phase1 =====
+PROJECT 2.1 (csv-merge)
+
+ORIGINAL NATURAL-LANGUAGE PROJECT (verbatim):
+In <PROJECT_ROOT> merge a.csv and b.csv.
+
+TERMINAL OUTCOME: PASS
+
+VERIFIER REPORT 1 (verbatim):
+All four requirements hold; out.csv has 42 rows and the header is preserved.
+
+VERDICT: PASS
+
+MEMORY CHANGES:
+{
+  "created": [
+    "notes/a.md",
+    "notes/b.md"
+  ],
+  "deleted": [
+    "old.md"
+  ],
+  "modified": [],
+  "unchanged": [
+    "tools/x.py"
+  ]
+}
+===== phase2 =====
+PRACTICE PROJECT p001
+
+ORIGINAL REQUEST (verbatim):
+In <PROJECT_ROOT> merge a.csv and b.csv.
+
+TERMINAL OUTCOME: FAIL
+
+VERIFIER REPORT (verbatim):
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+
+ACTOR LEARNING DIAGNOSIS (verbatim):
+The quoting rule is the gap.
+
+MEMORY CHANGES:
+{
+  "created": [],
+  "deleted": [],
+  "modified": [
+    "notes/a.md"
+  ]
+}
+===== phase2-evidence-rounds =====
+PRACTICE PROJECT
+
+ORIGINAL REQUEST (verbatim):
+In <PROJECT_ROOT> sort rows.
+
+TERMINAL OUTCOME: PASS
+
+VERIFIER REPORT 1 (verbatim):
+The deduplication rule could not be confirmed either way from the files alone.
+VERDICT: UNVERIFIED
+
+VERIFIER REPORT 2 (verbatim):
+All four requirements hold; out.csv has 42 rows and the header is preserved.
+
+VERDICT: PASS
+
+ACTOR LEARNING DIAGNOSIS (verbatim):
+(none)

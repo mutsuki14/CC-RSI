@@ -1,0 +1,4 @@
+===== default =====
+SAME-CONTEXT CONTINUATION.
+
+Your previous reply was cut off at the output limit before it finished; any tool call it was still writing did not run. Continue your current phase in this same context, keeping each tool call and each message smaller, and end your turn with the complete terminal handoff as your final message when the phase is complete.

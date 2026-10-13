@@ -1,0 +1,83 @@
+===== pass-learn =====
+cc-rsi · Verifier: VERDICT: PASS (generation 1, isolation=sandbox, model=claude-sonnet-4-5)
+
+The independent Verifier verified the task. Report:
+---
+All four requirements hold; out.csv has 42 rows and the header is preserved.
+
+VERDICT: PASS
+---
+Next: call learn to distill this experience into durable memory.
+===== pass-frozen =====
+cc-rsi · Verifier: VERDICT: PASS (generation 2, isolation=rollback, model=inherit)
+
+The independent Verifier verified the task. Report:
+---
+All four requirements hold; out.csv has 42 rows and the header is preserved.
+
+VERDICT: PASS
+---
+===== fail-notes =====
+cc-rsi · Verifier: VERDICT: FAIL (generation 2, isolation=rollback, model=opus)
+
+An INDEPENDENT INSPECTION of the live workspace (performed without seeing your work or assumptions) found concrete evidence that the task is NOT complete. Its findings:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Reconcile these findings with your own evidence — where you and the inspection interpret the task differently, hunt for the evidence that discriminates the two readings (especially any already-solved instance the task provides) — fix what is actually wrong, then call submit again.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The Verifier Agent has provided new evidence about the current candidate. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+
+If you decide to stop repairing, call learn: a FAIL still teaches.
+
+HARNESS NOTE: 22 path(s) changed during the inspection and were restored: f0.txt, f1.txt, f2.txt, f3.txt, f4.txt, f5.txt, f6.txt, f7.txt, f8.txt, f9.txt, f10.txt, f11.txt, f12.txt, f13.txt, f14.txt, f15.txt, f16.txt, f17.txt, f18.txt, f19.txt, …
+
+HARNESS NOTE: 2 file version(s) present at the end of the inspection were moved aside rather than deleted; they are kept in cc-rsi private state for the user.
+
+NOTE: the workspace has changed since this inspection, so this verdict does not cover the current state. Call submit again so a verdict covers the current candidate.
+===== fail-detect-only-tamper =====
+cc-rsi · Verifier: VERDICT: FAIL (generation 1, isolation=rollback, model=opus)
+
+An INDEPENDENT INSPECTION of the live workspace (performed without seeing your work or assumptions) found concrete evidence that the task is NOT complete. Its findings:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Reconcile these findings with your own evidence — where you and the inspection interpret the task differently, hunt for the evidence that discriminates the two readings (especially any already-solved instance the task provides) — fix what is actually wrong, then call submit again.
+
+HARNESS NOTE: 1 path(s) changed during the inspection; the workspace was too large to checkpoint, so inspect them: big.bin
+
+WARNING: canonical memory changed outside a commit; learning is refused until the user runs cc-rsi memory verify in a terminal.
+===== unverified =====
+cc-rsi · Verifier: VERDICT: UNVERIFIED (generation 1, isolation=rollback, model=opus)
+
+An INDEPENDENT INSPECTION could not CONFIRM the task is complete — it did not find it wrong; it could not gather enough evidence either way. What it could not confirm:
+---
+The deduplication rule could not be confirmed either way from the files alone.
+VERDICT: UNVERIFIED
+---
+
+DEMONSTRATE the unconfirmed parts through an INDEPENDENT CHANNEL the inspection can re-run from the workspace itself: run or render the deliverable and check the result, query the live service's OWN state, re-open the artifact with a different tool, show the process/server actually holding the work. Evidence the WORLD produces — a file you author about your own work proves nothing and will not count. Then call submit again with those independent-channel probes as evidence_leads; do NOT change correct work just because it was hard to confirm. If your evidence is actually thin there, strengthen the work first.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The Verifier Agent has provided new evidence about the current candidate. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+
+EVIDENCE LEADS: call submit with evidence_leads, a list with one {"claim", "probe"} object per unconfirmed requirement. claim: the requirement the probe demonstrates, in one sentence. probe: one exact read-only shell command (or a short script) the Verifier can re-run from the workspace; it prints PASS only when the claim holds. Only these claim/probe pairs reach the Verifier; nothing else you write is forwarded. The harness does not run the probes: the Verifier reproduces or falsifies them with its own instruments.
+
+UNVERIFIED is not a terminal verdict and cannot be learned.

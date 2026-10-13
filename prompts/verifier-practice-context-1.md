@@ -1,0 +1,1 @@
+The candidate project is a fresh copy of the captured candidate at the candidate root. Actor-private memory, handoff prose, reasoning, and execution logs are hidden by the harness. Investigate the actual candidate independently.

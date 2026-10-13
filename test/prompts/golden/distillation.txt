@@ -1,0 +1,70 @@
+===== engine-fail =====
+ACTOR AGENT — FINAL MEMORY DISTILLATION.
+
+This is the terminal learning turn for the project in your same Actor Agent
+context. The terminal outcome is FAIL. The Verifier Agent returned FAIL; no success was verified.
+
+FINAL VERIFIER AGENT REPORT — verbatim:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Review the complete experience available in your context: your decisions, actions,
+observations, the Verifier Agent's investigation, and the terminal outcome. Decide
+for yourself what this experience means for future work. The Verifier Agent
+establishes what was or was not verified; it does not establish why your approach
+succeeded or failed. Make causal claims only when your trajectory and evidence
+support them, and preserve uncertainty where they do not.
+
+Update your durable memory at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory in whatever way you judge will make a
+fresh future Actor Agent more capable. You may investigate remaining questions if
+the available project state makes that useful, and you may add, revise, reorganize,
+delete, or leave memory unchanged. You own the content, representation, retrieval
+strategy, scope, and stopping decision; there is no required schema, length,
+number of files, or number of turns. A FAIL may still contain valuable evidence,
+but must not be recorded as a verified success.
+
+The memory store accepts at most 400 files, 4194304 bytes in total, and
+65536 bytes per file. Never store secrets in memory.
+
+Do not continue changing the terminal project for credit. End your turn when the memory you choose to carry forward is ready.
+===== actor-pass =====
+ACTOR AGENT — FINAL MEMORY DISTILLATION.
+
+This is the terminal learning turn for the project in your same Actor Agent
+context. The terminal outcome is PASS. The Verifier Agent has verified the complete project.
+
+FINAL VERIFIER AGENT REPORT — verbatim:
+---
+All four requirements hold; out.csv has 42 rows and the header is preserved.
+
+VERDICT: PASS
+---
+
+Review the complete experience available in your context: your decisions, actions,
+observations, the Verifier Agent's investigation, and the terminal outcome. Decide
+for yourself what this experience means for future work. The Verifier Agent
+establishes what was or was not verified; it does not establish why your approach
+succeeded or failed. Make causal claims only when your trajectory and evidence
+support them, and preserve uncertainty where they do not.
+
+Update your durable memory at /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 in whatever way you judge will make a
+fresh future Actor Agent more capable. You may investigate remaining questions if
+the available project state makes that useful, and you may add, revise, reorganize,
+delete, or leave memory unchanged. You own the content, representation, retrieval
+strategy, scope, and stopping decision; there is no required schema, length,
+number of files, or number of turns. A FAIL may still contain valuable evidence,
+but must not be recorded as a verified success.
+
+The memory store accepts at most 400 files, 4194304 bytes in total, and
+65536 bytes per file. Never store secrets in memory.
+
+Do not continue changing the terminal project for credit. Edit /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 with your file tools (Read, Edit, Write, Bash). When the memory you choose to carry forward is ready there, call memory_commit with confirm "7f3a9c".

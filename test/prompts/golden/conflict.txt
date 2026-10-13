@@ -1,0 +1,12 @@
+===== engine =====
+ACTOR AGENT — MEMORY CONFLICT.
+
+Canonical memory changed while you were learning. Your previous draft is preserved at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory.prev; /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory now holds the current memory. Re-apply your changes there: compare your previous draft with the current memory, keep what was promoted meanwhile unless your evidence contradicts it, and reconcile the corpus as a whole against the trajectory and Verifier evidence in your context. Nothing was promoted, and this is not a grade.
+
+End your turn when the complete memory you choose to carry forward is internally reconciled and ready.
+===== actor =====
+ACTOR AGENT — MEMORY CONFLICT.
+
+Canonical memory changed while you were learning. Your previous draft is preserved at /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2.prev; /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 now holds the current memory. Re-apply your changes there: compare your previous draft with the current memory, keep what was promoted meanwhile unless your evidence contradicts it, and reconcile the corpus as a whole against the trajectory and Verifier evidence in your context. Nothing was promoted, and this is not a grade.
+
+When the complete memory you choose to carry forward in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 is internally reconciled and ready, call memory_commit with confirm "a1b2c3"; that call promotes the draft to durable memory.

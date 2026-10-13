@@ -1,0 +1,3 @@
+VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
+
+No {{VERDICT_WORDS}}, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: {{DETAIL}}. Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line {{VERDICT_LINES}} outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.

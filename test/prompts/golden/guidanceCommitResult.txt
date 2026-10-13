@@ -1,0 +1,51 @@
+===== reconcile =====
+ACTOR AGENT — TERMINAL MEMORY RECONCILIATION.
+
+Your first-pass memory update is a draft and has not been promoted. Continue in
+this same Actor Agent context with the complete project trajectory, terminal
+Verifier Agent evidence, live project state, and draft memory still available.
+
+Inventory the complete current durable-memory tree at /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 and inspect
+every claim-bearing file. Reconcile the corpus as a whole against the trajectory
+and final Verifier evidence already in context. Look for conflicting assertions,
+unsupported causal explanations, stale environment assumptions, and conclusions
+broader than the observed evidence. Investigate when that is useful; otherwise
+narrow or qualify claims, preserve uncertainty, reorganize them, or remove them.
+Do not merely append this episode while leaving contradicted older advice stated
+as fact.
+
+This is not a prescribed memory format or a request for a separate report. You
+still own the content, representation, retrieval strategy, scope, and stopping
+decision. There is no required claim table, schema, report, length, number of
+files, or number of turns. Neither the Verifier Agent nor Curriculum Agent grades
+the memory. When the complete memory you choose to carry forward in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 is internally reconciled and ready, call memory_commit with confirm "1a2b3c"; that call promotes the draft to durable memory.
+
+CONFIRM CODE: 1a2b3c
+===== promoted =====
+Memory promoted (PASS experience). created: notes/quoting.md; modified: tools/merge_csv.py; deleted: -. Tree 4f1c2a9be07d, 6 files.
+===== promoted-empty-lists =====
+Memory promoted (FAIL experience). created: -; modified: -; deleted: -. Tree 4f1c2a9be07d, 6 files.
+===== limit =====
+ACTOR AGENT — MEMORY LIMITS.
+
+The reconciled draft cannot be promoted: 412 files > 400. The memory store accepts at most 400 files, 4194304 bytes in total, and 65536 bytes per file. Condense, merge, or delete memory files in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 so that the complete memory you choose to carry forward fits, without recording anything as verified that was not. Nothing was promoted, and this is not a grade.
+
+When the complete memory you choose to carry forward in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 is internally reconciled and ready, call memory_commit with confirm "4d5e6f"; that call promotes the draft to durable memory.
+
+CONFIRM CODE: 4d5e6f
+===== conflict =====
+ACTOR AGENT — MEMORY CONFLICT.
+
+Canonical memory changed while you were learning. Your previous draft is preserved at /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2.prev; /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 now holds the current memory. Re-apply your changes there: compare your previous draft with the current memory, keep what was promoted meanwhile unless your evidence contradicts it, and reconcile the corpus as a whole against the trajectory and Verifier evidence in your context. Nothing was promoted, and this is not a grade.
+
+When the complete memory you choose to carry forward in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 is internally reconciled and ready, call memory_commit with confirm "777888"; that call promotes the draft to durable memory.
+
+CONFIRM CODE: 777888
+===== already =====
+This learning phase was already promoted to durable memory.
+===== quarantined =====
+This learning phase could not be promoted; durable memory is unchanged.
+===== frozen =====
+Memory is frozen for test-time reuse, so nothing was promoted. The draft is kept; after memory is unfrozen, call learn to continue this learning phase.
+===== abandoned =====
+The learning phase was abandoned: the draft was discarded and durable memory is unchanged.

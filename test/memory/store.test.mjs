@@ -1,0 +1,562 @@
+// MemoryStore (SPEC §6.2-§6.6). Ports dsh-rsi test/memory.test.ts (MemoryStore,
+// MemoryStore durability) to node:test and the cc-rsi API (the Actor writes draft files
+// directly), plus the §15.3 WP1 rows: tamper detection, rebaseDraft, sealed refusal, external
+// draft sweep by owner liveness, inventory.json, history.
+
+import assert from 'node:assert/strict'
+import { hostname } from 'node:os'
+import {
+  lstat, mkdir, readdir, readFile, rename, rm, stat, symlink, utimes, writeFile,
+} from 'node:fs/promises'
+import { join } from 'node:path'
+import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { LockTimeoutError } from '../../lib/core/errors.mjs'
+import {
+  MemoryConflictError, MemoryDraftMissingError, MemoryError, MemoryFrozenError, MemoryFrozenTamperError, MemoryLimitError,
+  MemoryQuarantineError, MemorySealedError, MemoryTamperError, UnsafeMemoryPathError,
+} from '../../lib/memory/errors.mjs'
+import { EMPTY_TREE_SHA256 } from '../../lib/memory/hash.mjs'
+import { MemoryStore } from '../../lib/memory/store.mjs'
+import { runNode } from '../_helpers/spawn.mjs'
+import { tmpDir } from '../_helpers/tmp.mjs'
+
+const limits = { maxFileBytes: 1024, maxTotalBytes: 4096, maxFiles: 8 }
+const DEAD_PID = 2 ** 22 + 12345
+const SEALED = 'the held out task asks for exactly seven red widgets on the second sheet'
+const STORE_MODULE = fileURLToPath(new URL('../../lib/memory/store.mjs', import.meta.url))
+
+async function put(dir, rel, content) {
+  await mkdir(join(dir, rel, '..'), { recursive: true })
+  await writeFile(join(dir, rel), content)
+}
+
+async function fresh(options = {}) {
+  const base = await tmpDir('cc-rsi-store-')
+  const root = join(base, 'store')
+  const store = await MemoryStore.open(root, { limits, ...options })
+  return { base, root, store }
+}
+
+async function learn(store, episode, files, meta = { kind: 'practice', outcome: 'PASS' }, draftOptions = {}) {
+  const draft = await store.openDraft(episode, draftOptions)
+  for (const [rel, content] of Object.entries(files)) {
+    if (content === null) await rm(join(draft.dir, rel), { force: true })
+    else await put(draft.dir, rel, content)
+  }
+  return store.commit(episode, meta)
+}
+
+describe('MemoryStore', () => {
+  it('promotes a draft atomically and journals the delta', async () => {
+    const { root, store } = await fresh()
+    assert.equal(await store.treeHash(), EMPTY_TREE_SHA256)
+    const draft = await store.openDraft('ep1')
+    assert.equal(draft.baseHash, EMPTY_TREE_SHA256)
+    await put(draft.dir, 'procedures/build.md', 'Run `make` then `make test`.')
+    assert.deepEqual((await store.inventory()).files, [])
+    const record = await store.commit('ep1', { kind: 'practice', outcome: 'PASS' })
+    assert.deepEqual(record.created, ['procedures/build.md'])
+    assert.equal(record.seq, 1)
+    assert.equal(record.v, 1)
+    assert.equal(record.treeBefore, EMPTY_TREE_SHA256)
+    assert.equal(record.treeAfter, await store.treeHash())
+    assert.equal(record.files, 1)
+    assert.equal(record.bytes, 28)
+    assert.deepEqual((await store.inventory()).files, [{ path: 'procedures/build.md', bytes: 28 }])
+    assert.equal((await store.inventory()).treeSha256, record.treeAfter)
+    assert.match(await readFile(join(store.memoryDir, 'procedures/build.md'), 'utf8'), /make test/)
+    assert.equal((await store.journal()).length, 1)
+    assert.deepEqual(await readdir(join(root, 'history')), ['0001'])
+    assert.equal(await store.getDraft('ep1'), undefined)
+    assert.equal(await store.expectedTreeHash(), record.treeAfter)
+    await store.assertCanonicalIntact()
+
+    const next = await learn(store, 'ep2', { 'procedures/build.md': null, 'lessons/flaky.md': 'Retry once; a second failure is real.' }, { kind: 'task', outcome: 'FAIL' })
+    assert.deepEqual(next.created, ['lessons/flaky.md'])
+    assert.deepEqual(next.deleted, ['procedures/build.md'])
+    assert.equal(next.treeBefore, record.treeAfter)
+    assert.equal(next.seq, 2)
+    assert.deepEqual((await store.history()).map(h => h.n), [1, 2])
+    assert.equal((await store.history())[1].treeSha256, next.treeAfter)
+    assert.deepEqual((await readdir(root)).filter(name => name.startsWith('.staging-') || name.startsWith('.backup-')), [])
+  })
+
+  it('refuses a draft whose base is no longer canonical, keeps it, and rebases with .prev', async () => {
+    const { store } = await fresh()
+    const a = await store.openDraft('a')
+    const b = await store.openDraft('b')
+    await put(a.dir, 'x.md', 'a')
+    await put(b.dir, 'y.md', 'b')
+    const committed = await store.commit('a', { kind: 'practice', outcome: 'PASS' })
+    await assert.rejects(store.commit('b', { kind: 'practice', outcome: 'PASS' }), err => {
+      assert.ok(err instanceof MemoryConflictError)
+      assert.equal(err.baseHash, b.baseHash)
+      assert.equal(err.currentHash, committed.treeAfter)
+      return true
+    })
+    assert.ok(await store.getDraft('b'))
+    const { prevDir, draft } = await store.rebaseDraft('b')
+    assert.equal(prevDir, `${b.dir}.prev`)
+    assert.equal(draft.dir, b.dir)
+    assert.equal(await readFile(join(prevDir, 'y.md'), 'utf8'), 'b')
+    assert.equal(await readFile(join(draft.dir, 'x.md'), 'utf8'), 'a')
+    assert.equal(draft.baseHash, await store.treeHash())
+    // The same Actor merges its previous draft into the rebased one.
+    await put(draft.dir, 'y.md', 'b')
+    const record = await store.commit('b', { kind: 'practice', outcome: 'PASS' })
+    assert.deepEqual(record.created, ['y.md'])
+    await assert.rejects(lstat(prevDir), /ENOENT/)
+    // A second rebase replaces an older .prev.
+    const c = await store.openDraft('c')
+    await put(c.dir, 'z.md', 'old')
+    await store.rebaseDraft('c')
+    const again = await store.rebaseDraft('c')
+    assert.deepEqual((await readdir(again.prevDir)).sort(), ['x.md', 'y.md'])
+    await assert.rejects(store.rebaseDraft('nope'), MemoryDraftMissingError)
+  })
+
+  it('enforces limits at commit and keeps the draft so the same Actor can condense it', async () => {
+    const { store } = await fresh()
+    const draft = await store.openDraft('big')
+    await put(draft.dir, 'big.md', 'x'.repeat(2048))
+    await assert.rejects(store.commit('big', { kind: 'practice', outcome: 'PASS' }), err => {
+      assert.ok(err instanceof MemoryLimitError)
+      assert.equal(err.detail, "'big.md' 2048 bytes > 1024")
+      return true
+    })
+    await rm(join(draft.dir, 'big.md'))
+    for (let i = 0; i < 9; i++) await put(draft.dir, `f${i}.md`, 'x')
+    await assert.rejects(store.commit('big', { kind: 'practice', outcome: 'PASS' }), err => err instanceof MemoryLimitError && /^9 files > 8$/.test(err.detail))
+    await rm(join(draft.dir, 'f8.md'))
+    assert.equal((await store.commit('big', { kind: 'practice', outcome: 'PASS' })).files, 8)
+  })
+
+  it('lets the Actor condense an over-limit draft in place (limits lowered after memory grew)', async () => {
+    const base = await tmpDir()
+    const root = join(base, 'store')
+    const roomy = await MemoryStore.open(root, { limits: { maxFileBytes: 4096, maxTotalBytes: 10000, maxFiles: 8 }, keepHistory: false })
+    await learn(roomy, 'big', { 'a.md': 'a'.repeat(3000), 'b.md': 'b'.repeat(3000) })
+    const tight = await MemoryStore.open(root, { limits: { maxFileBytes: 4096, maxTotalBytes: 4000, maxFiles: 8 }, keepHistory: false })
+    const draft = await tight.openDraft('trim')
+    await put(draft.dir, 'a.md', 'a'.repeat(1500))
+    await assert.rejects(tight.commit('trim', { kind: 'practice', outcome: 'PASS' }), /4500 bytes > 4000/)
+    await put(draft.dir, 'b.md', 'b'.repeat(1000))
+    assert.equal((await tight.commit('trim', { kind: 'practice', outcome: 'PASS' })).bytes, 2500)
+  })
+
+  it('freezes memory for test-time reuse and detects mutation', async () => {
+    const { store } = await fresh()
+    await learn(store, 'e', { 'a.md': 'a' })
+    const open = await store.openDraft('pending')
+    const { treeHash } = await store.freeze({ by: 'test' })
+    assert.equal(treeHash, await store.treeHash())
+    assert.deepEqual(await store.freeze({ by: 'again' }), { treeHash })
+    assert.equal((await store.frozen()).by, 'test')
+    await assert.rejects(store.openDraft('late'), MemoryFrozenError)
+    await assert.rejects(store.commit('pending', { kind: 'practice', outcome: 'PASS' }), MemoryFrozenError)
+    assert.ok(await store.getDraft('pending'), open.episode)
+    await store.assertFrozenIntact()
+    await writeFile(join(store.memoryDir, 'sneaky.md'), 'edited outside the protocol')
+    await assert.rejects(store.assertFrozenIntact(), err => err instanceof MemoryFrozenTamperError && err.expected === treeHash)
+    await assert.rejects(store.unfreeze(), MemoryFrozenTamperError)
+    await rm(join(store.memoryDir, 'sneaky.md'))
+    await store.unfreeze()
+    assert.equal(await store.frozen(), null)
+    await assert.rejects(store.assertFrozenIntact(), err => err instanceof MemoryError && err.code === 'memory_not_frozen')
+    assert.ok(await store.openDraft('later'))
+  })
+
+  it('refuses to freeze a tampered tree', async () => {
+    const { store } = await fresh()
+    await writeFile(join(store.memoryDir, 'outside.md'), 'x')
+    await assert.rejects(store.freeze({ by: 'x' }), MemoryTamperError)
+  })
+
+  it('refuses symlinks in canonical memory and in drafts', async () => {
+    const { store } = await fresh()
+    const draft = await store.openDraft('s')
+    await symlink('/etc/hostname', join(draft.dir, 'link'))
+    await assert.rejects(store.commit('s', { kind: 'practice', outcome: 'PASS' }), UnsafeMemoryPathError)
+    assert.ok(await store.getDraft('s'), 'the draft is kept so it can be fixed')
+    await symlink('/etc/hostname', join(store.memoryDir, 'link'))
+    await assert.rejects(store.treeHash(), /symlink/)
+    await assert.rejects(store.assertCanonicalIntact(), err => err instanceof MemoryTamperError && /invalid/.test(err.actual))
+  })
+
+  it('quarantines a commit that overlaps sealed material, absorbingly, without recording content', async () => {
+    const base = await tmpDir()
+    await writeFile(join(base, 'sealed.txt'), SEALED)
+    const root = join(base, 'store')
+    const audited = await MemoryStore.open(root, { limits, keepHistory: false, sealedTextFiles: [join(base, 'sealed.txt')] })
+    const draft = await audited.openDraft('leak')
+    await put(draft.dir, 'cheat.md', 'Remember: the held out task asks for exactly seven red widgets!')
+    await put(draft.dir, 'fine.md', 'unrelated')
+    await assert.rejects(audited.commit('leak', { kind: 'practice', outcome: 'PASS', origin: 'verdict-7', lineage: 'broad-x' }), err => {
+      assert.ok(err instanceof MemoryQuarantineError)
+      assert.equal(err.message, 'this learning phase could not be promoted; durable memory is unchanged')
+      return true
+    })
+    assert.deepEqual((await audited.inventory()).files, [])
+    assert.equal(await audited.treeHash(), EMPTY_TREE_SHA256)
+    assert.equal(await audited.getDraft('leak'), undefined)
+    const reopened = await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.equal(await reopened.isQuarantined('leak'), true)
+    assert.equal(await reopened.isQuarantined('verdict-7'), true)
+    assert.match(await readFile(join(root, 'quarantined', 'leak'), 'utf8'), /^\d{4}-\d\d-\d\dT[\d:.]+Z\n$/)
+    await assert.rejects(reopened.openDraft('leak'), MemoryQuarantineError)
+    const rejects = await readFile(join(root, 'audit_rejects.jsonl'), 'utf8')
+    assert.doesNotMatch(rejects, /widgets|held out/)
+    const line = JSON.parse(rejects.trim().split('\n')[0])
+    assert.deepEqual({ episode: line.episode, lineage: line.lineage, surface: line.surface, file: line.file, kinds: line.kinds },
+      { episode: 'leak', lineage: 'broad-x', surface: 'commit', file: 'cheat.md', kinds: ['shingle'] })
+    // auditTexts: a hit is recorded without content; a miss writes nothing.
+    assert.equal(await audited.auditTexts(['clean text only'], { surface: 'wave', lineage: 'broad-x' }), false)
+    assert.equal(await audited.auditTexts(['x', `notes: ${SEALED}`], { surface: 'wave', lineage: 'broad-x', episode: 'w001' }), true)
+    const all = (await readFile(join(root, 'audit_rejects.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l))
+    assert.equal(all.length, 2)
+    assert.deepEqual(all[1].kinds, ['shingle'])
+    assert.equal(all[1].surface, 'wave')
+    const plain = await MemoryStore.open(join(base, 'plain'), { limits })
+    assert.equal(await plain.auditTexts([SEALED], { surface: 'wave' }), false)
+  })
+
+  it('recovers from an install interrupted between its renames', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    await learn(store, 'ok', { 'keep.md': 'durable' })
+    await rename(store.memoryDir, join(root, '.backup-crash'))
+    await mkdir(join(root, '.staging-crash'))
+    const reopened = await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.equal(await readFile(join(reopened.memoryDir, 'keep.md'), 'utf8'), 'durable')
+    assert.deepEqual((await readdir(root)).filter(name => name.startsWith('.staging') || name.startsWith('.backup')), [])
+    await reopened.assertCanonicalIntact()
+  })
+
+  it('finishes an install whose tree reached canonical before its journal record', async () => {
+    const { root, store } = await fresh({ keepHistory: true })
+    const draft = await store.openDraft('task-s-3')
+    await put(draft.dir, 'lesson.md', 'promoted once')
+    const record = await store.commit('task-s-3', { kind: 'task', outcome: 'PASS' })
+    // The crash window: tree installed, marker present, journal and history not yet written, draft kept.
+    await writeFile(join(root, 'commit.pending.json'), `${JSON.stringify({ v: 1, record })}\n`)
+    await writeFile(join(root, 'journal.jsonl'), '')
+    await rm(join(root, 'history'), { recursive: true, force: true })
+    const again = await store.openDraft('task-s-3')
+    await writeFile(join(again.dir, 'lesson.md'), 'promoted once')
+    const restarted = await MemoryStore.open(root, { limits, keepHistory: true })
+    assert.equal((await restarted.findCommit('task-s-3')).treeAfter, record.treeAfter)
+    assert.equal(await restarted.getDraft('task-s-3'), undefined)
+    assert.deepEqual(await readdir(join(root, 'history')), ['0001'])
+    assert.equal((await readdir(root)).includes('commit.pending.json'), false)
+    await restarted.assertCanonicalIntact()
+    // A relearn of the same episode finds the commit instead of promoting twice.
+    const relearn = await restarted.openDraft('task-s-3')
+    await put(relearn.dir, 'lesson.md', 'promoted twice?')
+    assert.deepEqual(await restarted.commit('task-s-3', { kind: 'task', outcome: 'PASS' }), record)
+    assert.equal((await restarted.journal()).length, 1)
+  })
+
+  it('drops a pending commit whose install never happened (and a torn marker)', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    const draft = await store.openDraft('never')
+    await put(draft.dir, 'x.md', 'x')
+    const treeBefore = await store.treeHash()
+    await writeFile(join(root, 'commit.pending.json'), JSON.stringify({ v: 1, record: { episode: 'never', treeBefore, treeAfter: 'f'.repeat(64) } }))
+    const restarted = await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.deepEqual(await restarted.journal(), [])
+    assert.ok(await restarted.getDraft('never'))
+    assert.equal((await readdir(root)).includes('commit.pending.json'), false)
+    await writeFile(join(root, 'commit.pending.json'), '{"v":1,"rec')
+    await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.equal((await readdir(root)).includes('commit.pending.json'), false)
+    assert.ok((await restarted.commit('never', { kind: 'practice', outcome: 'PASS' })).treeAfter)
+  })
+
+  it('never reopens a half-discarded or half-opened draft', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    const draft = await store.openDraft('half')
+    await put(draft.dir, 'x.md', 'x')
+    // A discard that crashed after removing the metadata (removed first) leaves only a directory.
+    await rm(join(root, 'drafts', 'half.json'))
+    await writeFile(join(root, 'drafts', '.half.json.123.abc.tmp'), '{')
+    const restarted = await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.equal(await restarted.getDraft('half'), undefined)
+    assert.deepEqual(await readdir(join(root, 'drafts')), [])
+    await assert.rejects(restarted.commit('half', { kind: 'practice', outcome: 'PASS' }), MemoryDraftMissingError)
+  })
+
+  it('cleans up drafts of already-committed episodes at open', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    await learn(store, 'done', { 'a.md': 'a' })
+    await mkdir(join(root, 'drafts', 'done'), { recursive: true })
+    await writeFile(join(root, 'drafts', 'done.json'), JSON.stringify({ v: 1, episode: 'done', baseHash: '0'.repeat(64), baseManifest: {}, createdAt: '' }))
+    await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.deepEqual(await readdir(join(root, 'drafts')), [])
+  })
+
+  it('tolerates a torn final journal line and keeps a record appended after it', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    await learn(store, 'e', { 'a.md': 'a' })
+    await writeFile(join(root, 'journal.jsonl'), `${await readFile(join(root, 'journal.jsonl'), 'utf8')}{"episode":"tor`)
+    assert.deepEqual((await store.journal()).map(r => r.episode), ['e'])
+    await learn(store, 'after', { 'b.md': 'b' })
+    assert.deepEqual((await store.journal()).map(r => r.episode), ['e', 'after'])
+    assert.equal((await store.journal())[1].seq, 2)
+    await store.assertCanonicalIntact()
+  })
+
+  it('promotes one experience once, by episode and by origin (session forks)', async () => {
+    const { store } = await fresh({ keepHistory: false })
+    const fork = await store.openDraft('task-fork-7')
+    const parent = await store.openDraft('task-parent-7')
+    await put(fork.dir, 'lesson.md', 'from the fork')
+    await put(parent.dir, 'lesson.md', 'from the parent')
+    const first = await store.commit('task-fork-7', { kind: 'task', outcome: 'PASS', origin: 'task-parent-7' })
+    const second = await store.commit('task-parent-7', { kind: 'task', outcome: 'PASS', origin: 'task-parent-7' })
+    assert.deepEqual(second, first)
+    assert.equal((await store.journal()).length, 1)
+    assert.deepEqual(await store.findCommit('task-parent-7'), first)
+    assert.equal(await readFile(join(store.memoryDir, 'lesson.md'), 'utf8'), 'from the fork')
+    assert.equal(await store.getDraft('task-parent-7'), undefined)
+    assert.deepEqual(await store.commit('task-fork-7', { kind: 'task', outcome: 'PASS' }), first)
+  })
+
+  it('serializes commits across store instances: exactly one promotes, the other conflicts', async () => {
+    const { root, store: a } = await fresh({ keepHistory: false })
+    const b = await MemoryStore.open(root, { limits, keepHistory: false })
+    const da = await a.openDraft('a')
+    const db = await b.openDraft('b')
+    await put(da.dir, 'a.md', 'a')
+    await put(db.dir, 'b.md', 'b')
+    const results = await Promise.allSettled([a.commit('a', { kind: 'practice', outcome: 'PASS' }), b.commit('b', { kind: 'practice', outcome: 'PASS' })])
+    assert.equal(results.filter(r => r.status === 'fulfilled').length, 1)
+    assert.ok(results.find(r => r.status === 'rejected').reason instanceof MemoryConflictError)
+  })
+
+  it('serializes commits across two Node processes', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    for (const episode of ['p1', 'p2']) {
+      const draft = await store.openDraft(episode, { owner: { kind: 'session', sessionId: 'never-swept' } })
+      await put(draft.dir, `${episode}.md`, episode)
+    }
+    const script = `
+      const { MemoryStore } = await import(${JSON.stringify(STORE_MODULE)})
+      const store = await MemoryStore.open(process.argv[1], { keepHistory: false })
+      try { await store.commit(process.argv[2], { kind: 'practice', outcome: 'PASS' }); console.log('ok') }
+      catch (error) { console.log(error.code) }`
+    const runs = await Promise.all(['p1', 'p2'].map(ep => runNode('--input-type=module', ['-e', script, root, ep])))
+    assert.deepEqual(runs.map(r => r.stdout.trim()).sort(), ['memory_conflict', 'ok'], runs.map(r => r.stderr).join('\n'))
+    await store.assertCanonicalIntact()
+  })
+
+  it('takes over a lock left by a dead pid, an earlier same-pid process or an expired lease', async () => {
+    const { root, store } = await fresh({ keepHistory: false, lockOptions: { waitMs: 1500 } })
+    const lock = join(root, '.lock')
+    await writeFile(lock, JSON.stringify({ pid: DEAD_PID, host: hostname(), token: 't', at: '' }))
+    assert.equal((await store.openDraft('c')).episode, 'c')
+    // A container restart reuses the pid: same pid and host, but another process's token.
+    await writeFile(lock, JSON.stringify({ pid: process.pid, host: hostname(), token: 'earlier-process:x' }))
+    assert.equal((await store.openDraft('a')).episode, 'a')
+    // Another host whose lease ran out.
+    await writeFile(lock, JSON.stringify({ pid: 1, host: 'another-container', token: 't' }))
+    const old = new Date(Date.now() - 60_000)
+    await utimes(lock, old, old)
+    assert.equal((await store.openDraft('b')).episode, 'b')
+    // A live lock elsewhere is respected until the wait budget runs out.
+    await writeFile(lock, JSON.stringify({ pid: 1, host: 'another-container', token: 't' }))
+    await assert.rejects(store.openDraft('d'), LockTimeoutError)
+    await rm(lock)
+  })
+
+  it('detects tamper, accepts an external change, and restores history', async () => {
+    const { root, store } = await fresh()
+    const r1 = await learn(store, 'e1', { 'a.md': 'one' })
+    const r2 = await learn(store, 'e2', { 'a.md': 'two', 'b.md': 'b' })
+    await store.assertCanonicalIntact()
+    // An external write (e.g. a Bash edit) changes canonical outside a commit.
+    await writeFile(join(store.memoryDir, 'a.md'), 'edited outside')
+    await assert.rejects(store.assertCanonicalIntact(), err => {
+      assert.ok(err instanceof MemoryTamperError)
+      assert.equal(err.expected, r2.treeAfter)
+      assert.equal(err.actual, err.details.actual)
+      assert.notEqual(err.actual, r2.treeAfter)
+      return true
+    })
+    // Commits refuse while tampered; the draft is kept.
+    const d = await store.openDraft('e3')
+    await put(d.dir, 'c.md', 'c')
+    await assert.rejects(store.commit('e3', { kind: 'practice', outcome: 'PASS' }), MemoryTamperError)
+    assert.ok(await store.getDraft('e3'))
+    // Open never throws on tamper.
+    const reopened = await MemoryStore.open(root, { limits })
+    await assert.rejects(reopened.assertCanonicalIntact(), MemoryTamperError)
+
+    const accepted = await store.acceptExternal({ by: 'human' })
+    assert.equal(accepted.kind, 'external')
+    assert.equal(accepted.treeBefore, r2.treeAfter)
+    assert.equal(accepted.treeAfter, await store.treeHash())
+    assert.deepEqual(accepted.modified, ['a.md'])
+    assert.equal(accepted.by, 'human')
+    await store.assertCanonicalIntact()
+    assert.equal(await store.acceptExternal({ by: 'human' }), null)
+
+    await writeFile(join(store.memoryDir, 'junk.md'), 'more tamper')
+    const restored = await store.restoreHistory(1, { by: 'human' })
+    assert.equal(restored.kind, 'restore')
+    assert.equal(restored.restoredFrom, 1)
+    assert.equal(restored.treeAfter, r1.treeAfter)
+    assert.equal(await store.treeHash(), r1.treeAfter)
+    assert.equal(await readFile(join(store.memoryDir, 'a.md'), 'utf8'), 'one')
+    await store.assertCanonicalIntact()
+    assert.deepEqual((await store.inventory()).files, [{ path: 'a.md', bytes: 3 }])
+    await assert.rejects(store.restoreHistory(99, { by: 'human' }), err => err.code === 'memory_history_missing')
+    // The rebased draft can now proceed against the restored tree.
+    await assert.rejects(store.commit('e3', { kind: 'practice', outcome: 'PASS' }), MemoryConflictError)
+    const { draft } = await store.rebaseDraft('e3')
+    await put(draft.dir, 'c.md', 'c')
+    assert.deepEqual((await store.commit('e3', { kind: 'practice', outcome: 'PASS' })).created, ['c.md'])
+  })
+
+  it('refuses learning after a sealed evaluation until unfreeze --after-sealed', async () => {
+    const { store } = await fresh()
+    await learn(store, 'e1', { 'a.md': 'a' })
+    const pending = await store.openDraft('e2')
+    await put(pending.dir, 'b.md', 'b')
+    await store.freeze({ by: 'eval' })
+    await store.markSealed({ lineage: 'deep-1', runId: 'r-1' })
+    const sealed = await store.sealed()
+    assert.equal(sealed.learningAfterSealed, false)
+    assert.deepEqual(sealed.runs.map(r => [r.lineage, r.runId]), [['deep-1', 'r-1']])
+    await assert.rejects(store.unfreeze(), MemorySealedError)
+    await store.unfreeze({ afterSealed: true })
+    assert.equal((await store.sealed()).learningAfterSealed, true)
+    assert.equal(await store.frozen(), null)
+    assert.ok((await store.commit('e2', { kind: 'practice', outcome: 'PASS' })).treeAfter)
+    // A later sealed run closes learning again.
+    await store.markSealed({ lineage: 'deep-2', runId: 'r-2' })
+    await assert.rejects(store.openDraft('e3'), MemorySealedError)
+    await assert.rejects(store.restoreHistory(1, { by: 'h' }), MemorySealedError)
+  })
+
+  it('sweeps external drafts by owner liveness', async () => {
+    const { base, root, store } = await fresh({ keepHistory: false })
+    const sessions = join(base, 'sessions')
+    await mkdir(join(sessions, 'live-session'), { recursive: true })
+    const ext = name => join(base, 'work', name, 'memory')
+    await store.openDraft('engine-dead', { dir: ext('a'), owner: { kind: 'engine', pid: DEAD_PID, host: hostname(), lineage: 'gone' } })
+    await store.openDraft('engine-live', { dir: ext('b'), owner: { kind: 'engine', pid: process.pid, host: hostname() } })
+    await store.openDraft('engine-elsewhere', { dir: ext('c'), owner: { kind: 'engine', pid: DEAD_PID, host: 'another-host' } })
+    await store.openDraft('session-live', { dir: ext('d'), owner: { kind: 'session', sessionId: 'live-session' } })
+    await store.openDraft('session-ended', { dir: ext('e'), owner: { kind: 'session', sessionId: 'ended-session' } })
+    await store.openDraft('internal', { owner: { kind: 'engine', pid: DEAD_PID, host: hostname() } })
+    // A paused lineage keeps its draft although its engine exited (SPEC §12.8: resume continues it).
+    await mkdir(join(base, 'lineages', 'paused'), { recursive: true })
+    await writeFile(join(base, 'lineages', 'paused', 'state.json'), JSON.stringify({ v: 1, status: 'paused_infra' }))
+    await store.openDraft('engine-paused', { dir: ext('f'), owner: { kind: 'engine', pid: DEAD_PID, host: hostname(), lineage: 'paused' } })
+    await mkdir(join(base, 'lineages', 'done'), { recursive: true })
+    await writeFile(join(base, 'lineages', 'done', 'state.json'), JSON.stringify({ v: 1, status: 'completed' }))
+    await store.openDraft('engine-done', { dir: ext('g'), owner: { kind: 'engine', pid: DEAD_PID, host: hostname(), lineage: 'done' } })
+
+    const listed = await store.drafts()
+    assert.equal(listed.length, 8)
+    assert.deepEqual(listed.filter(d => !d.live).map(d => d.episode), ['engine-dead', 'engine-done', 'internal', 'session-ended'])
+    assert.ok(listed.every(d => d.dirExists && !d.committed))
+    await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.deepEqual((await store.drafts()).map(d => d.episode), ['engine-elsewhere', 'engine-live', 'engine-paused', 'session-live'])
+    const kept = []
+    for (const episode of ['engine-dead', 'engine-live', 'engine-elsewhere', 'session-live', 'session-ended', 'internal', 'engine-paused', 'engine-done']) {
+      if (await store.getDraft(episode)) kept.push(episode)
+    }
+    assert.deepEqual(kept, ['engine-live', 'engine-elsewhere', 'session-live', 'engine-paused'])
+    await assert.rejects(lstat(ext('a')), /ENOENT/)
+    await assert.rejects(lstat(ext('e')), /ENOENT/)
+    await assert.rejects(lstat(ext('g')), /ENOENT/)
+    assert.ok((await stat(ext('d'))).isDirectory())
+    assert.deepEqual((await readdir(join(root, 'drafts'))).sort(),
+      ['engine-elsewhere.json', 'engine-live.json', 'engine-paused.json', 'session-live.json'])
+  })
+
+  it('reuses an existing draft, refreshes its owner, and discards with fresh', async () => {
+    const { base, store } = await fresh()
+    const dir = join(base, 'ext', 'memory')
+    const first = await store.openDraft('ep', { dir, owner: { kind: 'engine', pid: DEAD_PID, host: hostname() } })
+    await put(dir, 'note.md', 'kept')
+    const again = await store.openDraft('ep', { dir, owner: { kind: 'engine', pid: process.pid, host: hostname() } })
+    assert.equal(again.baseHash, first.baseHash)
+    assert.equal(again.owner.pid, process.pid)
+    assert.equal(await readFile(join(dir, 'note.md'), 'utf8'), 'kept')
+    const reset = await store.openDraft('ep', { dir, fresh: true })
+    assert.deepEqual(await readdir(reset.dir), [])
+    // Moving the draft to another dir discards the old one.
+    const moved = await store.openDraft('ep', { dir: join(base, 'ext2', 'memory') })
+    await assert.rejects(lstat(dir), /ENOENT/)
+    assert.ok((await stat(moved.dir)).isDirectory())
+    await store.discardDraft('ep')
+    await assert.rejects(lstat(moved.dir), /ENOENT/)
+    assert.equal(await store.getDraft('ep'), undefined)
+  })
+
+  it('refuses unsafe draft directories', async () => {
+    const { base, root, store } = await fresh()
+    await assert.rejects(store.openDraft('x', { dir: join(root, 'memory') }), UnsafeMemoryPathError)
+    await assert.rejects(store.openDraft('x', { dir: join(root, 'history', 'x') }), UnsafeMemoryPathError)
+    await assert.rejects(store.openDraft('x', { dir: base }), UnsafeMemoryPathError)
+    await assert.rejects(store.openDraft('x', { dir: join(root, 'drafts') }), UnsafeMemoryPathError)
+    await assert.rejects(store.openDraft('x', { dir: '/' }), UnsafeMemoryPathError)
+    const target = join(base, 'elsewhere')
+    await mkdir(target)
+    await symlink(target, join(base, 'link'))
+    await assert.rejects(store.openDraft('x', { dir: join(base, 'link') }), UnsafeMemoryPathError)
+  })
+
+  it('stores reports by content and refuses altered ones', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    const sha = await store.putReport('VERDICT: PASS')
+    assert.match(sha, /^[0-9a-f]{64}$/)
+    assert.equal(await store.putReport('VERDICT: PASS'), sha)
+    assert.equal(await store.getReport(sha), 'VERDICT: PASS')
+    await writeFile(join(root, 'reports', `${sha}.md`), 'VERDICT: FAIL')
+    assert.equal(await store.getReport(sha), undefined)
+    assert.equal(await store.putReport('VERDICT: PASS'), sha)
+    assert.equal(await store.getReport(sha), 'VERDICT: PASS')
+    assert.equal(await store.getReport('../escape'), undefined)
+    assert.equal(await store.getReport('0'.repeat(64)), undefined)
+  })
+
+  it('rebuilds a stale inventory.json at open and on refresh', async () => {
+    const { root, store } = await fresh({ keepHistory: false })
+    await learn(store, 'e', { 'a.md': 'aaa' })
+    const cached = JSON.parse(await readFile(join(root, 'inventory.json'), 'utf8'))
+    assert.equal(cached.v, 1)
+    assert.equal(cached.totalBytes, 3)
+    await writeFile(join(root, 'inventory.json'), JSON.stringify({ ...cached, treeSha256: 'f'.repeat(64) }))
+    assert.equal((await store.inventory()).treeSha256, 'f'.repeat(64))
+    assert.equal((await store.inventory({ refresh: true })).treeSha256, await store.treeHash())
+    await rm(join(root, 'inventory.json'))
+    await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.equal(JSON.parse(await readFile(join(root, 'inventory.json'), 'utf8')).treeSha256, await store.treeHash())
+  })
+
+  it('refuses to commit without a draft and validates the episode', async () => {
+    const { store } = await fresh()
+    await assert.rejects(store.commit('ghost', { kind: 'practice', outcome: 'PASS' }), MemoryDraftMissingError)
+    await assert.rejects(store.openDraft(''), MemoryError)
+  })
+
+  it('drops __pycache__ from drafts at commit', async () => {
+    const { store } = await fresh()
+    const record = await learn(store, 'py', { 'tool.py': 'print(1)', '__pycache__/tool.pyc': 'x', 'x.pyo': 'y' })
+    assert.deepEqual(record.created, ['tool.py'])
+    assert.deepEqual((await store.inventory()).files.map(f => f.path), ['tool.py'])
+  })
+
+  it('opens with every documented option and closes cleanly', async () => {
+    const base = await tmpDir()
+    const logged = []
+    const logger = { info: m => logged.push(m), warn: m => logged.push(m), error: m => logged.push(m) }
+    const store = await MemoryStore.open(join(base, 's'), { limits, keepHistory: false, sealedTextFiles: [], shingleWords: 8, logger, lockOptions: { waitMs: 1000 } })
+    assert.equal(store.root, join(base, 's'))
+    assert.equal(store.memoryDir, join(base, 's', 'memory'))
+    await store.close()
+  })
+})

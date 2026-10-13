@@ -1,0 +1,120 @@
+===== handoff =====
+NOTE: a previous attempt already worked on this task in this same project root and environment and ended without finishing. The project root RETAINS all of its progress — your reconnaissance will find existing work; verify what is already correct and build on it instead of redoing it.
+
+The previous attempt's work log:
+CURRENT STATE: parser half rewritten.
+NEXT: fix quoting.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The conversation or environment channel has just recovered from an interruption. Durable memory remains available at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+
+TASK:
+Make `make test` pass.
+
+PROJECT ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+
+You are a fresh Actor Agent context continuing this target attempt; nothing has been
+examined in this context yet. Decide how much work the task still requires; you
+choose the strategy, investigation, amount of work, and when your best candidate is
+ready.
+
+When you decide to stop target work, end your turn with one complete lossless
+handoff as your final message. Put the line STATUS: SUBMIT on a line of its own
+(outside any code block), then freely record what you delivered, where relevant
+artifacts are, what changed, and any uncertainty or unresolved state the Verifier
+Agent should investigate. SUBMIT is neutral: it claims neither success nor failure
+and applies equally to complete, partial, or blocked work. Do not update durable
+memory during target work.
+
+GENERIC RUNTIME OWNERSHIP BOUNDARY:
+The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001. Keep supplied project
+inputs, editable project state, required project-local dependencies, and final
+deliverables inside that root and leave it nonempty. Put disposable application
+extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
+outside it (for example in a temporary directory such as /tmp), and remove any such
+debugging debris you accidentally created inside the root before your terminal
+handoff. Do not remove supplied inputs or anything required to replay the submitted
+project. Never create symbolic links or special files inside the root. The harness
+snapshots only this root; it does not judge the contents. During project work,
+/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only experience: edits to your memory directory
+during work are discarded. Only the later terminal memory-distillation phase can
+promote memory.
+===== handoff-no-log =====
+NOTE: a previous attempt already worked on this task in this same project root and environment and ended without finishing. The project root RETAINS all of its progress — your reconnaissance will find existing work; verify what is already correct and build on it instead of redoing it.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The conversation or environment channel has just recovered from an interruption. Durable memory remains available at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+
+TASK:
+Make `make test` pass.
+
+PROJECT ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+
+You are a fresh Actor Agent context continuing this target attempt; nothing has been
+examined in this context yet. Decide how much work the task still requires; you
+choose the strategy, investigation, amount of work, and when your best candidate is
+ready.
+
+When you decide to stop target work, end your turn with one complete lossless
+handoff as your final message. Put the line STATUS: SUBMIT on a line of its own
+(outside any code block), then freely record what you delivered, where relevant
+artifacts are, what changed, and any uncertainty or unresolved state the Verifier
+Agent should investigate. SUBMIT is neutral: it claims neither success nor failure
+and applies equally to complete, partial, or blocked work. Do not update durable
+memory during target work.
+
+GENERIC RUNTIME OWNERSHIP BOUNDARY:
+The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001. Keep supplied project
+inputs, editable project state, required project-local dependencies, and final
+deliverables inside that root and leave it nonempty. Put disposable application
+extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
+outside it (for example in a temporary directory such as /tmp), and remove any such
+debugging debris you accidentally created inside the root before your terminal
+handoff. Do not remove supplied inputs or anything required to replay the submitted
+project. Never create symbolic links or special files inside the root. The harness
+snapshots only this root; it does not judge the contents. During project work,
+/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only experience: edits to your memory directory
+during work are discarded. Only the later terminal memory-distillation phase can
+promote memory.
+===== pivot =====
+NOTE: a previous attempt on this task in this same project root and environment stalled WITHOUT changing any files — there is no partial work to protect. Choose a MATERIALLY DIFFERENT strategy from the one it used (different tool, entry point, or method); do not re-run the failed approach unchanged.
+
+The previous attempt's self-review:
+(1) sed edits (2) quoting (3) use the csv module
+
+Its work log (facts it discovered remain true):
+tried sed edits — failed because quoting.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The conversation or environment channel has just recovered from an interruption. Durable memory remains available at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+
+TASK:
+Make `make test` pass.
+
+PROJECT ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+
+You are a fresh Actor Agent context continuing this target attempt; nothing has been
+examined in this context yet. Decide how much work the task still requires; you
+choose the strategy, investigation, amount of work, and when your best candidate is
+ready.
+
+When you decide to stop target work, end your turn with one complete lossless
+handoff as your final message. Put the line STATUS: SUBMIT on a line of its own
+(outside any code block), then freely record what you delivered, where relevant
+artifacts are, what changed, and any uncertainty or unresolved state the Verifier
+Agent should investigate. SUBMIT is neutral: it claims neither success nor failure
+and applies equally to complete, partial, or blocked work. Do not update durable
+memory during target work.
+
+GENERIC RUNTIME OWNERSHIP BOUNDARY:
+The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001. Keep supplied project
+inputs, editable project state, required project-local dependencies, and final
+deliverables inside that root and leave it nonempty. Put disposable application
+extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
+outside it (for example in a temporary directory such as /tmp), and remove any such
+debugging debris you accidentally created inside the root before your terminal
+handoff. Do not remove supplied inputs or anything required to replay the submitted
+project. Never create symbolic links or special files inside the root. The harness
+snapshots only this root; it does not judge the contents. During project work,
+/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only experience: edits to your memory directory
+during work are discarded. Only the later terminal memory-distillation phase can
+promote memory.
+===== handoff-capped =====
+14494

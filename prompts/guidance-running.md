@@ -1,0 +1,1 @@
+VERIFICATION RUNNING (job {{JOB_ID}}, generation {{GENERATION}}): the independent Verifier has been inspecting for {{ELAPSED}} s. File edits and shell commands are paused until it finishes. Call wait_verdict to receive the verdict.

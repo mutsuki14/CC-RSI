@@ -1,0 +1,2 @@
+===== default =====
+VERIFICATION RUNNING (job j-20261013120000-a1b2c3, generation 2): the independent Verifier has been inspecting for 100 s. File edits and shell commands are paused until it finishes. Call wait_verdict to receive the verdict.

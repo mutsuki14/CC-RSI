@@ -1,0 +1,1 @@
+Harness-owned Actor-private paths — the Actor Agent's durable memory, its session logs, and the harness's private state — are mechanically hidden from your tools by design; do not look for them. A tool error naming such a path means the boundary worked. Verify authoritative inputs and the candidate surface; private policy/scratch contents are not correctness evidence.

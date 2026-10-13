@@ -1,0 +1,10 @@
+===== default =====
+CURRICULUM AGENT — SAME-CONTEXT WAVE CONTINUATION.
+
+The prior segment did not commit a replayable wave: the fixture tree for project "csv-1" is not replayable: it is empty. This is a generic
+transport/workspace observation, not a grade, search instruction, or convergence
+signal. Your draft fixtures at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/curriculum-private/authoring and other private working files
+remain. Inspect and continue that work in your same context. End your turn with a fresh
+complete handoff when ready, the JSON envelope in a fenced json block of your final
+message; only its declared projects will be replayed. You remain free to choose WAVE,
+SATURATED, or STALLED based on your evidence.

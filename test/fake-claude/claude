@@ -1,0 +1,14 @@
+#!/usr/bin/env node
+// Fake `claude` launcher (SPEC §15.2). CommonJS on purpose: an extensionless file is CommonJS
+// when package.json has no "type" field (SPEC §0), so this loads the ESM implementation with a
+// dynamic import. Point CC_RSI_CLAUDE_BIN (or config children.claudeBin) at this file.
+'use strict'
+const { join } = require('node:path')
+const { pathToFileURL } = require('node:url')
+
+import(pathToFileURL(join(__dirname, 'claude.mjs')).href)
+  .then(mod => mod.main())
+  .catch(error => {
+    process.stderr.write(`FAKE: internal error: ${(error && error.stack) || error}\n`)
+    process.exit(70)
+  })

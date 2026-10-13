@@ -1,0 +1,16 @@
+===== verifier =====
+
+
+[MEMORY RETRIEVAL OPPORTUNITY] The Verifier Agent has provided new evidence about the current candidate. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+===== fold =====
+
+
+[MEMORY RETRIEVAL OPPORTUNITY] Some earlier conversation context was compressed into a summary. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+===== recovery =====
+
+
+[MEMORY RETRIEVAL OPPORTUNITY] The conversation or environment channel has just recovered from an interruption. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+===== stagnation =====
+
+
+[MEMORY RETRIEVAL OPPORTUNITY] Recent actions show a recurring or low-information pattern. Durable memory remains available at /srv/cc/home/projects/demo-0123456789ab/views/5e1c0a2b/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.

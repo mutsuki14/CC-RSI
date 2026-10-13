@@ -1,0 +1,47 @@
+===== engine =====
+An INDEPENDENT INSPECTION of the live workspace (performed without seeing your work or assumptions) found concrete evidence that the task is NOT complete. Its findings:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Reconcile these findings with your own evidence — where you and the inspection interpret the task differently, hunt for the evidence that discriminates the two readings (especially any already-solved instance the task provides) — fix what is actually wrong, then end your turn with a new complete handoff as your final message, with the line STATUS: SUBMIT on a line of its own.
+===== engine-memory =====
+An INDEPENDENT INSPECTION of the live workspace (performed without seeing your work or assumptions) found concrete evidence that the task is NOT complete. Its findings:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Reconcile these findings with your own evidence — where you and the inspection interpret the task differently, hunt for the evidence that discriminates the two readings (especially any already-solved instance the task provides) — fix what is actually wrong, then end your turn with a new complete handoff as your final message, with the line STATUS: SUBMIT on a line of its own.
+
+[MEMORY RETRIEVAL OPPORTUNITY] The Verifier Agent has provided new evidence about the current candidate. Durable memory remains available at /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory. Consider re-reading previously useful files or inspecting unread files that may now be relevant; decide yourself what, if anything, to retrieve.
+===== interactive =====
+An INDEPENDENT INSPECTION of the live workspace (performed without seeing your work or assumptions) found concrete evidence that the task is NOT complete. Its findings:
+---
+# Inspection of generation 1
+I ran `python3 merge.py a.csv b.csv` from the candidate root: the output drops the quoted comma row.
+
+```
+$ wc -l out.csv
+41 out.csv
+```
+
+VERDICT: FAIL
+---
+
+Reconcile these findings with your own evidence — where you and the inspection interpret the task differently, hunt for the evidence that discriminates the two readings (especially any already-solved instance the task provides) — fix what is actually wrong, then call submit again.

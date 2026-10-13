@@ -1,0 +1,3 @@
+HARNESS RECOVERY: the harness was interrupted while delivering or awaiting your reply to the message below. Claude Code may show an interrupted tool call; its outcome is unknown, so check the current state yourself. If you already acted on the message, continue from where you are; otherwise act on it now. This is not a grade.
+--- MESSAGE ---
+{{MESSAGE}}

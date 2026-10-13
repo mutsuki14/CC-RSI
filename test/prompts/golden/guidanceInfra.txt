@@ -1,0 +1,5 @@
+===== full =====
+INFRASTRUCTURE: the independent inspection could not reach a verdict (auth). This is not a verdict about your work. Log in again or check apiKeyHelper; run cc-rsi doctor --live in a terminal.
+Detail: authentication_failed (401)
+===== bare =====
+INFRASTRUCTURE: the independent inspection could not reach a verdict (job_died). This is not a verdict about your work.

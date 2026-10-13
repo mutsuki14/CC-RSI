@@ -1,0 +1,12 @@
+===== engine =====
+ACTOR AGENT — MEMORY LIMITS.
+
+The reconciled draft cannot be promoted: 412 files > 400; 'notes/big.md' 70211 bytes > 65536. The memory store accepts at most 400 files, 4194304 bytes in total, and 65536 bytes per file. Condense, merge, or delete memory files in /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory so that the complete memory you choose to carry forward fits, without recording anything as verified that was not. Nothing was promoted, and this is not a grade.
+
+End your turn when the complete memory you choose to carry forward is internally reconciled and ready.
+===== actor =====
+ACTOR AGENT — MEMORY LIMITS.
+
+The reconciled draft cannot be promoted: 5000000 bytes > 4194304. The memory store accepts at most 400 files, 4194304 bytes in total, and 65536 bytes per file. Condense, merge, or delete memory files in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 so that the complete memory you choose to carry forward fits, without recording anything as verified that was not. Nothing was promoted, and this is not a grade.
+
+When the complete memory you choose to carry forward in /srv/cc/home/projects/demo-0123456789ab/drafts/task-5e1c0a2b-3-g2 is internally reconciled and ready, call memory_commit with confirm "ffee00"; that call promotes the draft to durable memory.
