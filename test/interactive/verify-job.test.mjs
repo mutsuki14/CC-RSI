@@ -5,7 +5,8 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { writeJsonAtomic } from '../../lib/core/atomic.mjs'
@@ -17,7 +18,7 @@ import { MemoryStore } from '../../lib/memory/store.mjs'
 import { staticProbe } from '../../lib/runtime/sandbox.mjs'
 import { workspaceDigest } from '../../lib/interactive/session.mjs'
 import { openTask, readTask, withTask } from '../../lib/interactive/task.mjs'
-import { acquireWorkspaceLock, listLocksSync, recoverPendingLocks, releaseWorkspaceLock } from '../../lib/interactive/wslock.mjs'
+import { acquireWorkspaceLock, listLocksSync, lockFileFor, recoverPendingLocks, releaseWorkspaceLock } from '../../lib/interactive/wslock.mjs'
 import { NOT_CURRENT_PREFIX, recoverJob, runJob, verifierHidden, verifierHiddenTokens, verifierSpec } from '../../lib/interactive/verify-job.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
@@ -183,6 +184,29 @@ describe('verification job', () => {
     assert.ok(policy.readRoots.some(r => results.startsWith(`${r}/`)) && policy.allowedPaths.some(r => results.startsWith(`${r}/`)), 'Read is allowed by the role guard')
     for (const command of [`tail -50 ${results.replace(sessionId, randomUUID())}`, `cat ${join(cfg, 'projects', slug)}/*.jsonl`, `cat /tmp/claude-${uid}/-other/s/tasks/a.output`]) {
       assert.ok(bash(command), command)
+    }
+    // Claude Code's own deny rules (and the sandbox's denyRead) must not refuse it either: deny wins
+    // over allow there, so the hidden projects root is narrowed around the own session dir (r3-interactive-2).
+    const actorTranscript = join(cfg, 'projects', slug, `${randomUUID()}.jsonl`)
+    mkdirSync(join(cfg, 'projects', slug, sessionId, 'tool-results'), { recursive: true })
+    writeFileSync(actorTranscript, '{}\n')
+    const { buildSettings } = await import('../../lib/runtime/settings.mjs')
+    for (const sandbox of [false, true]) {
+      const settings = buildSettings(verifierSpec({ job: { candidateRoot: p.repo, config: {}, verifier: { ctxKey: 'task-1-v1', sessionId } }, home: p.home, sl, scratch, sandbox, env }), { pluginRoot: ROOT, forwarded: {} })
+      const rules = settings.permissions.deny.filter(r => r.startsWith('Read('))
+      const covered = path => rules.some(r => {
+        const body = r.slice('Read(/'.length, -1)
+        if (body.endsWith('/**/*.jsonl')) return path.startsWith(body.slice(0, -'**/*.jsonl'.length)) && path.endsWith('.jsonl')
+        if (body.endsWith('/**')) return path === body.slice(0, -3) || path.startsWith(body.slice(0, -2))
+        return path === body
+      })
+      assert.equal(covered(results), false, `sandbox=${sandbox}: the own tool results are not denied`)
+      assert.equal(covered(actorTranscript), true, `sandbox=${sandbox}: the Actor's transcript stays denied`)
+      if (sandbox) {
+        const denyRead = settings.sandbox.filesystem.denyRead
+        assert.ok(!denyRead.some(d => results === d || results.startsWith(`${d}/`)), 'denyRead spares the own session dir')
+        assert.ok(denyRead.includes(actorTranscript))
+      }
     }
   })
 
@@ -392,6 +416,40 @@ describe('verification job', () => {
     await writeJsonAtomic(file, { ...done, status: 'running', pid: process.pid, heartbeatAt: new Date().toISOString() })
     assert.equal((await recoverJob(file, { env: p.env })).status, 'running')
     await writeJsonAtomic(file, done)
+  })
+
+  it('a finished job\'s recovery releases the sticky lock record its final release left behind (r3-engine-concurrency-3)', async () => {
+    const p = await setupProject({ script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'VERDICT: FAIL' } } } })
+    const { file, sl } = await queuedJob(p)
+    const done = await runJob(file, { env: p.env })
+    assert.equal(done.status, 'done')
+    const { g } = layouts(p)
+    const path = lockFileFor(g.locks, p.repo)
+    // The job's (or its recovery's) last release could not take the guard in time: its sticky record
+    // stays, its holder is gone, and the guard keeps spawning this job's recovery for it.
+    const plant = owner => {
+      writeFileSync(path, JSON.stringify({ pid: deadPid(), host: hostname(), token: 'gone:1', at: new Date().toISOString(),
+        owner: { root: p.repo, jobId: done.id, sessionId: p.sid, jobFile: file, restoreFailed: false, checkpointOpen: true, recovering: true, ...owner } }))
+      const past = new Date(Date.now() - 3600000)
+      utimesSync(path, past, past)
+    }
+    plant({})
+    const [pending] = listLocksSync(g.locks)
+    assert.equal(pending.recoveryPending, true)
+    assert.equal(pending.jobFile, file)
+    assert.equal((await recoverJob(file, { env: p.env })).status, 'done', 'the finished job is left as it is')
+    assert.equal(existsSync(path), false, 'the leftover record is released')
+    // Never a restore failure, never another job's record, never while a checkpoint is still on disk.
+    plant({ restoreFailed: true })
+    await recoverJob(file, { env: p.env })
+    assert.equal(existsSync(path), true, 'a restore failure waits for a human')
+    plant({ jobId: 'j-other' })
+    await recoverJob(file, { env: p.env })
+    assert.equal(existsSync(path), true, 'another job\'s record is not ours')
+    plant({})
+    mkdirSync(join(sl.checkpoints, done.id), { recursive: true })
+    await recoverJob(file, { env: p.env })
+    assert.equal(existsSync(path), true, 'a checkpoint still on disk keeps the root locked')
   })
 
   it('a candidate swapped by an outside process during a sandboxed inspection gets no verdict (security-2)', async () => {

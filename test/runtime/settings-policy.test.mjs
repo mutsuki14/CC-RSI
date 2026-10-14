@@ -2,13 +2,13 @@
 // sandbox mode, forwarded auth keys, content addressing.
 
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { MUTATION_BASH_DENY } from '../../lib/guard/bash.mjs'
 import { buildPolicy, scratchOf, writePolicy } from '../../lib/runtime/policy.mjs'
-import { absRule, buildSettings, pinFileFor, writeSettings } from '../../lib/runtime/settings.mjs'
-import { tmpHome } from '../_helpers/tmp.mjs'
+import { absRule, buildSettings, hiddenDenials, pinFileFor, writeSettings } from '../../lib/runtime/settings.mjs'
+import { tmpDir, tmpHome } from '../_helpers/tmp.mjs'
 
 const ROOT = '/opt/cc-rsi'
 const NODE = '/usr/bin/node'
@@ -139,4 +139,76 @@ test('writeSettings / writePolicy are content addressed and repair a tampered fi
   assert.equal(JSON.parse(readFileSync(p1, 'utf8')).role, 'verifier')
   const other = await writePolicy(home, buildPolicy(verifierSpec({ home, hidden: [] })))
   assert.notEqual(other, p1)
+})
+
+/** Whether a Claude Code Read deny rule (as buildSettings writes them) or a denyRead path covers `path`. */
+function ruleCovers(rule, path) {
+  const m = /^Read\(\/(\/.*)\)$/.exec(rule)
+  if (!m) return false
+  const body = m[1]
+  if (body.endsWith('/**/*.jsonl')) {
+    const dir = body.slice(0, -'/**/*.jsonl'.length) || '/'
+    return path.startsWith(dir === '/' ? '/' : `${dir}/`) && path.endsWith('.jsonl')
+  }
+  if (body.endsWith('/**')) {
+    const dir = body.slice(0, -3) || '/'
+    return path === dir || path.startsWith(dir === '/' ? '/' : `${dir}/`)
+  }
+  return path === body
+}
+const pathCovers = (denied, path) => path === denied || path.startsWith(`${denied}/`)
+
+test('a hidden root holding the role\'s own session dir is narrowed, never denying its own tool results (r3-interactive-2)', async () => {
+  const cfg = await tmpDir('cc-rsi-cfg-')
+  const projects = join(cfg, 'projects')
+  const slug = '-repo'
+  const own = join(projects, slug, '11111111-1111-4111-8111-111111111111')
+  const actor = '22222222-2222-4222-8222-222222222222'
+  for (const dir of [join(own, 'tool-results'), join(projects, slug, actor, 'subagents'), join(projects, slug, 'memory'), join(projects, '-other-project', 'x')]) mkdirSync(dir, { recursive: true })
+  writeFileSync(join(projects, slug, `${actor}.jsonl`), '{"type":"assistant"}\n')
+  writeFileSync(join(projects, slug, 'notes.txt'), 'x\n')
+  writeFileSync(join(own, 'tool-results', 'b938lf2vx.txt'), 'big output\n')
+  symlinkSync(join(projects, '-other-project'), join(projects, slug, 'linked'))
+  const results = join(own, 'tool-results', 'b938lf2vx.txt')
+  for (const sandbox of [null, { allowWrite: [`${H}/vscratch/s1`], denyWrite: ['/repo'], denyRead: [], network: [] }]) {
+    const spec = verifierSpec({ hidden: [`${H}/projects`, projects], ownPaths: [own], sandbox })
+    const s = buildSettings(spec, { pluginRoot: ROOT, nodePath: NODE })
+    const rules = s.permissions.deny.filter(r => r.startsWith('Read('))
+    for (const path of [own, results]) {
+      assert.deepEqual(rules.filter(r => ruleCovers(r, path)), [], `no Read deny covers ${path}`)
+    }
+    assert.ok(!rules.includes(absRule('Read', projects)), 'the whole projects tree is not denied')
+    // Everything else under the hidden root stays denied: the Actor's transcript and session dir,
+    // other projects, auto memory, links, and transcripts created later anywhere below it.
+    for (const path of [join(projects, slug, `${actor}.jsonl`), join(projects, slug, actor, 'subagents', 'a.jsonl'), join(projects, slug, 'memory', 'MEMORY.md'),
+      join(projects, '-other-project', 'x', 'y'), join(projects, slug, 'notes.txt'), join(projects, slug, 'linked', 'x'), join(projects, '-later', 'later.jsonl'),
+      join(projects, slug, 'later-session.jsonl')]) {
+      assert.ok(rules.some(r => ruleCovers(r, path)), `a Read deny covers ${path}`)
+    }
+    assert.ok(rules.includes(absRule('Read', `${H}/projects`)), 'other hidden roots are denied whole')
+    if (sandbox) {
+      const denyRead = s.sandbox.filesystem.denyRead
+      for (const path of [own, results]) assert.ok(!denyRead.some(d => pathCovers(d, path)), `no denyRead covers ${path}`)
+      for (const path of [join(projects, slug, `${actor}.jsonl`), join(projects, slug, actor), join(projects, slug, 'memory'), join(projects, '-other-project'), `${H}/projects`]) {
+        assert.ok(denyRead.some(d => pathCovers(d, path)), `denyRead covers ${path}`)
+      }
+    } else {
+      assert.equal(s.sandbox, undefined)
+    }
+  }
+  // A lineage role (engine/roles.mjs withOwnSession: an Actor whose cwd is its work tree) gets the same
+  // narrowing for its own session dir under the same hidden root.
+  const { ownSessionDirs } = await import('../../lib/runtime/private.mjs')
+  const lineageCwd = `${W}/projects/w001`
+  const lineageSid = '33333333-3333-4333-8333-333333333333'
+  const lineageOwn = ownSessionDirs({ cwd: lineageCwd, sessionId: lineageSid, env: { HOME: '/nonexistent-home', CLAUDE_CONFIG_DIR: cfg } })
+  assert.ok(lineageOwn.some(o => o.startsWith(`${projects}/`)), JSON.stringify(lineageOwn))
+  const lineageSettings = buildSettings({ key: 'w001/actor', role: 'actor', cwd: lineageCwd, tools: ['Read'], allow: ['Read'], deny: [], hidden: [projects], ownPaths: lineageOwn,
+    systemText: 'engine', logDir: `${H}/x`, home: H, pluginRoot: ROOT, config: {} }, { pluginRoot: ROOT, nodePath: NODE })
+  const actorRules = lineageSettings.permissions.deny.filter(r => r.startsWith('Read('))
+  for (const o of lineageOwn) assert.deepEqual(actorRules.filter(r => ruleCovers(r, join(o, 'tool-results', 'x.txt'))), [], o)
+  assert.ok(actorRules.some(r => ruleCovers(r, join(projects, slug, `${actor}.jsonl`))))
+  // A hidden root that is the own path itself is not denied; roots without own paths are unchanged.
+  assert.deepEqual(hiddenDenials(['/x/own', '/y'], ['/x/own']), { rules: ['Read(//y/**)'], paths: ['/y'] })
+  assert.deepEqual(hiddenDenials(['/y'], []), { rules: ['Read(//y/**)'], paths: ['/y'] })
 })

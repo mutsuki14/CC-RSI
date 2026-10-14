@@ -385,3 +385,31 @@ test('initInertRepo creates an inert repository once, so role git never discover
   await initInertRepo(work)
   assert.equal(await readFile(join(work, '.gitignore'), 'utf8'), '*\n!keep\n')
 })
+
+test('lsFiles and statusDigest leave out untracked files below derived-cache directories on request; tracked ones stay (r3-interactive-1)', async () => {
+  const { DERIVED_DIR_NAMES } = await import('../../lib/workspace/git.mjs')
+  const repo = await gitRepo({ 'mod.py': 'X = 1\n', 'vendor/node_modules/pkg/index.js': 'tracked\n' })
+  for (const dir of ['__pycache__', 'src/__pycache__', 'node_modules/.cache', '.venv/lib']) await mkdir(join(repo, dir), { recursive: true })
+  const caches = ['__pycache__/mod.cpython-313.pyc', 'src/__pycache__/x.pyc', 'node_modules/.cache/babel.json', '.venv/lib/site.py']
+  for (const rel of caches) await writeFile(join(repo, rel), 'stale\n')
+  await writeFile(join(repo, 'new.txt'), 'untracked candidate file\n')
+  const all = (await lsFiles(repo)).files
+  for (const rel of caches) assert.ok(all.includes(rel), `listed by default: ${rel}`)
+  const skipped = (await lsFiles(repo, { skipUntrackedIn: DERIVED_DIR_NAMES })).files
+  for (const rel of caches) assert.ok(!skipped.includes(rel), `left out: ${rel}`)
+  for (const rel of ['mod.py', 'new.txt', 'vendor/node_modules/pkg/index.js']) assert.ok(skipped.includes(rel), `kept: ${rel}`)
+  assert.deepEqual(skipped, all.filter(rel => !caches.includes(rel)))
+  // statusDigest: a rewritten untracked cache does not move the digest; candidate changes still do.
+  const opts = { skipUntrackedIn: DERIVED_DIR_NAMES }
+  const before = await statusDigest(repo, opts)
+  const plainBefore = await statusDigest(repo)
+  await writeFile(join(repo, '__pycache__/mod.cpython-313.pyc'), 'fresh bytecode, another size\n')
+  await writeFile(join(repo, 'node_modules/.cache/new.json'), '{}\n')
+  assert.equal(await statusDigest(repo, opts), before)
+  assert.notEqual(await statusDigest(repo), plainBefore, 'the default digest still sees them')
+  await writeFile(join(repo, 'vendor/node_modules/pkg/index.js'), 'tracked, edited\n')
+  const tracked = await statusDigest(repo, opts)
+  assert.notEqual(tracked, before, 'a tracked file below node_modules is candidate content')
+  await writeFile(join(repo, 'new.txt'), 'edited, longer than before\n')
+  assert.notEqual(await statusDigest(repo, opts), tracked)
+})

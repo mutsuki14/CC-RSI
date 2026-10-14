@@ -74,8 +74,17 @@ test('Verifier charter continuity, prior reports, decision contract and validati
   assert.ok(!/CHANGED SINCE/.test(R.verifierCharter({ ...base, changedSinceLast: '' })))
   // A context that did not perform the last inspection is told so (r2-interactive-9).
   const earlier = R.verifierCharter({ ...base, changedSinceLast: 'MODIFIED: a.py', changedByEarlierContext: true })
-  assert.match(earlier, /CHANGED SINCE THE LAST INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\)/)
+  assert.match(earlier, /CHANGED SINCE THE LAST PUBLISHED INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\)/)
   assert.ok(!/YOUR LAST INSPECTION/.test(earlier))
+  assert.equal(R.verifierCharter({ ...base, changedSinceLast: 'MODIFIED: a.py', changedFraming: 'earlier' }), earlier)
+  // A fresh context on the same model: its prior reports are its own, so the section is neutral (r3-interactive-6).
+  const fresh = R.verifierCharter({ ...base, generation: 2, priorReports: [{ generation: 1, text: 'r1' }], handover: 'self', changedSinceLast: 'MODIFIED: a.py', changedFraming: 'published' })
+  assert.match(fresh, /Your prior investigations remain yours\./)
+  assert.match(fresh, /YOUR PRIOR PUBLISHED REPORTS ON EARLIER GENERATIONS/)
+  assert.match(fresh, /CHANGED SINCE THE LAST PUBLISHED INSPECTION \(harness file comparison, not a grade\):\n---\nMODIFIED: a\.py\n---/)
+  assert.doesNotMatch(fresh, /not by you|earlier Verifier context|YOUR LAST INSPECTION/)
+  assert.match(R.verifierCharter({ ...base, changedSinceLast: 'MODIFIED: a.py', changedFraming: 'own' }), /CHANGED SINCE YOUR LAST INSPECTION/)
+  assert.throws(() => R.verifierCharter({ ...base, changedSinceLast: 'x', changedFraming: 'theirs' }), /changedFraming/)
   // A practice context already contained in the mechanical context is not repeated.
   const pc = R.verifierPracticeContext({ phase: 1 })
   const once = R.verifierCharter({ ...base, mechanical: `${pc}\n\nCREATED: x`, practiceContext: pc })
@@ -104,6 +113,8 @@ test('the Verifier mechanics paragraph claims only the isolation actually used',
   // lineage target inspection ('full') is rolled back without that consequence.
   assert.match(rollback, /Leave every file the candidate already has byte-identical: run destructive or mutating experiments on a copy in VERIFIER_SCRATCH/)
   assert.match(rollback, /a PASS does not count as current verification of this workspace/)
+  // Bytecode and other caches written beside the sources are named, with the harness's own remedy (r3-interactive-1).
+  assert.match(rollback, /Tools that write caches or compiled files beside the sources \(bytecode, build caches, generated stubs\) rewrite candidate files as a side effect: Python already runs with PYTHONDONTWRITEBYTECODE=1/)
   const full = R.verifierSystem({ location: 'live', sandbox: false, allowUnverified: false, checkpoint: 'full' })
   assert.ok(!/byte-identical/.test(full))
   assert.match(sandbox, /VERDICT: PASS or VERDICT: FAIL outside quotes/)
@@ -309,7 +320,7 @@ test('live Verifier mechanics never claim a restore the checkpoint does not perf
   const live = (sandbox, extra = {}) => R.verifierSystem({ location: 'live', sandbox, allowUnverified: true, ...extra })
   // Default (the interactive checkpoint): only the files git lists are restored, and it says so.
   for (const text of [live(false), live(true), live(false, { checkpoint: 'listed' })]) {
-    assert.match(text, /files that git tracks or would add \(outside a git repository: every file except those under node_modules, \.venv and __pycache__ directories\)/)
+    assert.match(text, /files that git tracks or would add, except untracked files under node_modules, \.venv and __pycache__ directories \(outside a git repository: every file except those under such directories\)/)
     assert.match(text, /git ignores/)
     assert.ok(!/restores every changed file[,.]/.test(text))
   }

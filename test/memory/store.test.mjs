@@ -315,6 +315,50 @@ describe('MemoryStore', () => {
     await assert.rejects(restarted.commit('half', { kind: 'practice', outcome: 'PASS' }), MemoryDraftMissingError)
   })
 
+  it('builds a draft copy aside: a crash inside it never leaves a partial draft directory (r3-engine-concurrency-4)', async () => {
+    const fsp = (await import('node:fs/promises')).default
+    const { syncBuiltinESMExports } = await import('node:module')
+    const { root, store } = await fresh({ keepHistory: false })
+    const seed = await store.openDraft('seed')
+    for (const name of ['a.md', 'b.md', 'c.md']) await put(seed.dir, name, name)
+    await store.commit('seed', { kind: 'practice', outcome: 'PASS' })
+    const target = join(root, 'drafts', 'half')
+    const { open, rm: realRm } = fsp
+    let written = 0
+    let dead = false
+    // The process dies after one file of the copy: its staging directory is never cleaned up.
+    fsp.open = async (path, flags, ...rest) => {
+      if (flags === 'wx' && String(path).startsWith(target) && ++written === 2) {
+        dead = true
+        throw new Error('injected crash inside the copy')
+      }
+      return open(path, flags, ...rest)
+    }
+    fsp.rm = async (path, options) => {
+      if (dead && String(path).startsWith(`${target}.staging-`)) throw new Error('the process is gone')
+      return realRm(path, options)
+    }
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(store.openDraft('half'), /injected crash/)
+    } finally {
+      fsp.open = open
+      fsp.rm = realRm
+      syncBuiltinESMExports()
+    }
+    assert.equal(written, 2)
+    const names = await readdir(join(root, 'drafts'))
+    assert.equal(names.includes('half'), false, 'no partial copy where the draft belongs')
+    assert.equal(names.includes('half.json'), false)
+    assert.equal(await store.getDraft('half'), undefined)
+    // Recovery sweeps the staging leftover; a new open copies the whole canonical tree.
+    const restarted = await MemoryStore.open(root, { limits, keepHistory: false })
+    assert.deepEqual(await readdir(join(root, 'drafts')), [])
+    const draft = await restarted.openDraft('half')
+    assert.deepEqual((await readdir(draft.dir)).sort(), ['a.md', 'b.md', 'c.md'])
+    assert.deepEqual((await readdir(join(root, 'drafts'))).sort(), ['half', 'half.json'])
+  })
+
   it('cleans up drafts of already-committed episodes at open', async () => {
     const { root, store } = await fresh({ keepHistory: false })
     await learn(store, 'done', { 'a.md': 'a' })

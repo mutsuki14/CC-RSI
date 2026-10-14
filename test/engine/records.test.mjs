@@ -296,6 +296,99 @@ describe('daemon and resume', () => {
     assert.ok(sent)
   })
 
+  describe('the journal record of an accepted drift (r3-engine-concurrency-5)', () => {
+    // As in the r2-engine-2 test: the update changes engine code, and the refreshed prompt snapshot
+    // rewords a message the first wave already sent.
+    async function driftedLineage(id) {
+      const e = await engineEnv({ world: { waves: [[{ id: 'a' }]], actors: { 'w001-a': { apiErrorOnce: { status: 401, error: 'authentication_failed' } } } } })
+      const { dir } = await create(e, { phase: 'broad', id, direction: 'd' })
+      assert.equal((await run(e, dir)).status, 'paused_infra')
+      const v2 = await tmpDir('cc-rsi-plugin-v2-')
+      for (const sub of ['lib', 'hooks', 'prompts']) cpSync(join(REPO_ROOT, sub), join(v2, sub), { recursive: true })
+      writeFileSync(join(v2, 'lib', 'runtime', 'errors.mjs'), `${readFileSync(join(v2, 'lib', 'runtime', 'errors.mjs'), 'utf8')}\n// v2\n`)
+      const reword = () => {
+        const snapshot = join(e.layout(id).promptsSnapshot, 'curriculum-runtime-contract.md')
+        writeFileSync(snapshot, `${readFileSync(snapshot, 'utf8')}\nOne more sentence in v2.\n`)
+      }
+      const admit = async () => {
+        const admitted = await admitResume(dir, { pluginRoot: v2, acceptDrift: true, env: e.env })
+        assert.equal(admitted.ok, true, admitted.reasons.join('; '))
+        return admitted
+      }
+      return { e, dir, v2, reword, admit }
+    }
+
+    async function assertReplayed(e, dir, v2) {
+      const resumed = await run(e, dir, { pluginRoot: v2 })
+      assert.equal(resumed.status, 'completed', JSON.stringify(resumed.infra))
+      assert.ok((await events(dir)).some(ev => ev.type === 'REPLAY_TEXT_DRIFT' && ev.op === 'w001/cur/m1'))
+      assert.equal(readJson(join(dir, 'lineage.json')).lock.driftAccepted.length, 1)
+    }
+
+    it('an --accept-drift interrupted before its record leaves the drift to accept again', async () => {
+      const { e, dir, v2, reword, admit } = await driftedLineage('gap1')
+      const realEvent = OpJournal.prototype.event
+      OpJournal.prototype.event = async function (key, ...rest) {
+        if (String(key).startsWith('drift:')) throw new Error('interrupted before the DRIFT_ACCEPTED record')
+        return realEvent.call(this, key, ...rest)
+      }
+      try {
+        await assert.rejects(applyResume(dir, await admit()), /interrupted/)
+      } finally {
+        OpJournal.prototype.event = realEvent
+      }
+      assert.deepEqual(readJson(join(dir, 'lineage.json')).lock.driftAccepted, [], 'nothing names the drift without its record')
+      await applyResume(dir, await admit())
+      reword()
+      await assertReplayed(e, dir, v2)
+    })
+
+    it('an --accept-drift interrupted after its record writes a fresh one when it is accepted again', async () => {
+      const { e, dir, v2, reword, admit } = await driftedLineage('gap2')
+      const fsp = (await import('node:fs/promises')).default
+      const { syncBuiltinESMExports } = await import('node:module')
+      const { rename } = fsp
+      const lineageJson = join(dir, 'lineage.json')
+      fsp.rename = async (from, to) => {
+        if (String(to) === lineageJson) throw new Error('interrupted before lineage.json was written')
+        return rename(from, to)
+      }
+      syncBuiltinESMExports()
+      try {
+        await assert.rejects(applyResume(dir, await admit()), /interrupted/)
+      } finally {
+        fsp.rename = rename
+        syncBuiltinESMExports()
+      }
+      assert.ok((await OpJournal.open(dir)).isDone('drift:1'))
+      await applyResume(dir, await admit())
+      reword()
+      const j = await OpJournal.open(dir)
+      assert.deepEqual(j.keysWithPrefix('drift:').filter(key => j.isDone(key)), ['drift:1', 'drift:2'])
+      await assertReplayed(e, dir, v2)
+    })
+
+    it('the engine writes the missing record of a drift an older version accepted', async () => {
+      const { e, dir, v2, reword, admit } = await driftedLineage('gap3')
+      await applyResume(dir, await admit())
+      reword()
+      // An older `explore resume --accept-drift` wrote lineage.json, then stopped before the record.
+      for (const name of ['ops.jsonl', 'events.jsonl']) {
+        const path = join(dir, name)
+        const kept = readFileSync(path, 'utf8').split('\n').filter(Boolean).filter(line => {
+          const record = JSON.parse(line)
+          return !/^drift:/.test(String(record.key ?? record.op ?? ''))
+        })
+        writeFileSync(path, `${kept.join('\n')}\n`)
+      }
+      assert.equal((await OpJournal.open(dir)).hasStart('drift:1'), false)
+      await assertReplayed(e, dir, v2)
+      const j = await OpJournal.open(dir)
+      assert.ok(j.isDone('drift:1'))
+      assert.ok((await events(dir)).some(ev => ev.type === 'DRIFT_ACCEPTED' && ev.backfilled === true))
+    })
+  })
+
   it('an engine whose lease was taken over stops without touching the journal or the state (memory-crash-9)', async () => {
     const e = await engineEnv({ world: { waves: [[{ id: 'slow' }]], actors: { 'w001-slow': { hangOnce: 60000 } } } })
     const { dir } = await create(e, { phase: 'broad', id: 'fenced', direction: 'd' })
@@ -430,6 +523,48 @@ describe('daemon and resume', () => {
     assert.equal(readFileSync(join(`${dirOf('three')}.prev`, 'lesson.md'), 'utf8'), 'three')
     // (5) Nothing of the Actor's left: refused, never an empty draft.
     await assert.rejects(rebaseOrRepair(store, 'none', dirOf('none'), owner), e2 => e2.code === 'memory_draft_missing')
+    await store.close()
+  })
+
+  it('a crash inside the canonical copy of a lost-draft repair never takes a partial copy for the Actor\'s draft (r3-engine-concurrency-4)', async () => {
+    const { rebaseOrRepair } = await import('../../lib/engine/learn.mjs')
+    const fsp = (await import('node:fs/promises')).default
+    const { syncBuiltinESMExports } = await import('node:module')
+    const e = await engineEnv()
+    const store = await MemoryStore.open(e.pl.store, { sessionsDir: e.pl.sessions, lineagesDir: e.pl.lineages })
+    const owner = { kind: 'engine', pid: process.pid, host: (await import('node:os')).hostname(), lineage: 'x' }
+    const base = await tmpDir()
+    await store.openDraft('seed', { dir: join(base, 'seed'), fresh: true, owner })
+    for (const name of ['a.md', 'b.md', 'c.md']) writeFileSync(join(base, 'seed', name), `canonical ${name}\n`)
+    await store.commit('seed', { kind: 'practice' })
+    // The Actor's draft of e1 holds its lesson; the draft's record is lost.
+    const memoryDir = join(base, 't001', 'memory')
+    await store.openDraft('e1', { dir: memoryDir, fresh: true, owner })
+    writeFileSync(join(memoryDir, 'actor-lesson.md'), 'the Actor work\n')
+    rmSync(join(e.pl.store, 'drafts', 'e1.json'))
+    // The repair dies inside the canonical copy: one file written, then the process stops.
+    const { open } = fsp
+    let written = 0
+    fsp.open = async (path, flags, ...rest) => {
+      if (flags === 'wx' && String(path).startsWith(memoryDir) && ++written === 2) throw new Error('injected crash inside the canonical copy')
+      return open(path, flags, ...rest)
+    }
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(rebaseOrRepair(store, 'e1', memoryDir, owner), /injected crash/)
+    } finally {
+      fsp.open = open
+      syncBuiltinESMExports()
+    }
+    assert.equal(written, 2)
+    assert.equal(existsSync(memoryDir), false, 'no partial copy sits where the draft belongs')
+    assert.equal(readFileSync(join(`${memoryDir}.prev`, 'actor-lesson.md'), 'utf8'), 'the Actor work\n')
+    // The recovering op.
+    assert.deepEqual(await rebaseOrRepair(store, 'e1', memoryDir, owner), { prevDir: `${memoryDir}.prev` })
+    assert.equal(readFileSync(join(`${memoryDir}.prev`, 'actor-lesson.md'), 'utf8'), 'the Actor work\n', '.prev still holds the Actor\'s work')
+    assert.deepEqual(readdirSync(memoryDir).sort(), ['a.md', 'b.md', 'c.md'])
+    assert.deepEqual(readdirSync(join(base, 't001')).sort(), ['memory', 'memory.prev'])
+    assert.ok(await store.getDraft('e1'))
     await store.close()
   })
 

@@ -41,8 +41,11 @@ export async function setupProject({ files = { 'README.md': '# demo\n', 'src/app
   if (script) writeScript(fake, script)
   writeFileSync(join(home, 'config.json'), `${JSON.stringify(config, null, 2)}\n`)
   // Hermetic: a temp CLAUDE_CONFIG_DIR (the real ~/.claude settings and transcripts never reach a test).
+  // The Verifier model is a saved plugin option: the hooks (CLAUDE_PLUGIN_OPTION_*) and the MCP server
+  // (CC_RSI_OPT_*) both see it; the server applies what the hooks recorded (r3-interactive-5).
   const env = {
-    ...cleanEnv(fake.env), CLAUDE_PROJECT_DIR: repo, CC_RSI_HOME: home, CLAUDE_CONFIG_DIR: homeEnv.CLAUDE_CONFIG_DIR, CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model',
+    ...cleanEnv(fake.env), CLAUDE_PROJECT_DIR: repo, CC_RSI_HOME: home, CLAUDE_CONFIG_DIR: homeEnv.CLAUDE_CONFIG_DIR,
+    CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model', CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL: 'test-verifier-model',
   }
   return {
     home,

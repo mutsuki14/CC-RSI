@@ -2,7 +2,10 @@
 // claude, the real MCP server over stdio, the real hooks and the real detached verification job.
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { mkdtemp } from 'node:fs/promises'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -222,7 +225,7 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     await withClient(p, async client => {
       const r = await callTool(p, client, 'submit', {})
       assert.match(r.text, /VERDICT: PASS \(generation 1/)
-      assert.match(r.text, /NOTE: 1 pre-existing path\(s\) changed during the inspection, by the Verifier's own commands .* or by another process: src\/app\.txt\. The harness restored them/)
+      assert.match(r.text, /NOTE: 1 pre-existing path\(s\) changed during the inspection, by the Verifier's own commands .* or by another process: src\/app\.txt\. The harness restored them, and they match your candidate again now/)
       assert.match(r.text, /This verdict does not count as current: it cannot be learned/)
       assert.match(r.text, /HARNESS NOTE: 2 path\(s\) changed during the inspection and were restored: created-by-verifier\.txt, src\/app\.txt|HARNESS NOTE: \d path\(s\) changed during the inspection and were restored: .*src\/app\.txt/)
       assert.match(r.text, /HARNESS NOTE: \d file version\(s\) present at the end of the inspection were moved aside/)
@@ -449,8 +452,9 @@ describe('interactive flow (fake claude + real server + real job)', () => {
       assert.match((await callTool(p, client, 'submit', {})).text, /VERDICT: FAIL \(generation 1/)
     })
     assert.equal(taskState(p).task.reports[0].verifierModel, 'test-verifier-model')
-    // The user switches the Verifier model between submissions.
+    // The user switches the Verifier model between submissions (the hooks and the server see it).
     p.env.CC_RSI_OPT_VERIFIER_MODEL = 'other-verifier-model'
+    p.env.CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL = 'other-verifier-model'
     p.write('src/app.txt', 'version 2\n')
     await withClient(p, async client => {
       assert.match((await callTool(p, client, 'submit', {})).text, /generation 2/)
@@ -466,8 +470,8 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     assert.match(seeded, /PUBLISHED REPORTS OF THE EARLIER VERIFIER CONTEXT/)
     assert.doesNotMatch(seeded, /YOUR PRIOR PUBLISHED REPORTS|Your prior investigations remain yours/)
     // It never hears of "your last inspection" either (r2-interactive-9).
-    assert.match(seeded, /CHANGED SINCE THE LAST INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\):/)
-    assert.match(seeded, /FILE-CHANGE EVIDENCE since the last inspection \(by an earlier Verifier context\):/)
+    assert.match(seeded, /CHANGED SINCE THE LAST PUBLISHED INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\):/)
+    assert.match(seeded, /FILE-CHANGE EVIDENCE since the last published inspection \(by an earlier Verifier context\):/)
     assert.doesNotMatch(seeded, /YOUR LAST INSPECTION|since your last inspection/)
   })
 
@@ -516,7 +520,30 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     // A server not yet reconnected (its env still says sonnet) follows the record the hooks refreshed.
     const { mcpUserConfig } = await import('../../lib/interactive/session.mjs')
     assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'auto' }, { pluginOptions: { sandbox: 'off' } }), { sandbox: 'off' }, 'a substituted default never wins')
-    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'require' }, { pluginOptions: { sandbox: 'off' } }), { sandbox: 'require' }, 'a newer saved value wins over a stale record')
+    // The record is complete: a stale server env never overrides it (r3-interactive-5).
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'off' }, { pluginOptions: { sandbox: 'require' } }), { sandbox: 'require' }, 'a stale env never downgrades a newer saved value')
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_VERIFIER_MODEL: 'sonnet' }, { pluginOptions: { verifier_model: 'opus' } }), { verifier_model: 'opus' })
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'off' }, { pluginOptions: {} }), {}, 'a cleared option stays cleared')
+    // Without any record, the env counts, except a value that may be a substituted manifest default.
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'off', CC_RSI_OPT_STOP_POLICY: 'nudge', CC_RSI_OPT_VERIFIER_MODEL: '' }, null), { sandbox: 'off' })
+  })
+
+  it('a stale MCP env never overrides the options the hooks recorded: a saved sandbox=require is never downgraded (r3-interactive-5)', async () => {
+    const p = await setupProject({ script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'Not yet.\nVERDICT: FAIL' } } } })
+    homes.push(p.home)
+    // The session started with sandbox=off saved; the user then saves sandbox=require. The hooks see it
+    // at once; the plugin MCP server is not respawned, so its env still says off.
+    await hook('session-start', payloads.sessionStart(p), { ...p.env, CLAUDE_PLUGIN_OPTION_SANDBOX: 'off', CC_RSI_OPT_SANDBOX: 'off' })
+    p.env = { ...p.env, CLAUDE_PLUGIN_OPTION_SANDBOX: 'require', CC_RSI_OPT_SANDBOX: 'off' }
+    await userSays(p, 'Change src/app.txt to say version 2')
+    await withClient(p, async client => {
+      const status = await callTool(p, client, 'status', {})
+      assert.match(status.text, /isolation: Verifier (sandbox|refused) /, status.text)
+      await callTool(p, client, 'submit', {})
+    })
+    const [job] = jobsOf(p)
+    assert.equal(job.isolationWant, 'require', 'the saved require reaches the job')
+    assert.notEqual(job.result?.isolation?.mode ?? job.isolationUsed?.mode, 'rollback', 'never an unconfined Verifier against the saved require')
   })
 
   it('submit refuses (infra, no job) when the plugin code changed since SessionStart (security-4)', async () => {
@@ -573,5 +600,191 @@ describe('interactive flow (fake claude + real server + real job)', () => {
       const store = await openStoreOf(p)
       assert.equal((await store.journal()).length, 0)
     })
+  })
+})
+
+/** Every Verifier prompt in invocation order: `[{ key, n, text }]`. */
+function orderedPrompts(p) {
+  const ctxDir = layouts(p).sl.ctx
+  const out = []
+  for (const key of readdirSync(ctxDir).sort()) {
+    for (const n of readdirSync(join(ctxDir, key)).sort((a, b) => Number(a) - Number(b))) {
+      const file = join(ctxDir, key, n, 'prompt.md')
+      if (existsSync(file)) out.push({ key, n, text: readFileSync(file, 'utf8') })
+    }
+  }
+  return out
+}
+
+const hasPython = spawnSync('python3', ['--version']).status === 0
+
+describe('round-3 interactive fixes', () => {
+  it('a Verifier rewriting untracked derived caches keeps its PASS current; its Python writes no bytecode (r3-interactive-1)', async () => {
+    const p = await project({
+      files: { 'README.md': '# demo\n', 'src/app.txt': 'version 1\n' },
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { default: { actions: [{ tool: 'Bash', command:
+        'printf fresh > __pycache__/mod.cpython-313.pyc; printf fresh > node_modules/.cache/babel.json; printf fresh > .venv/lib/site.pyc; cat src/app.txt' }],
+      text: 'src/app.txt says version 2.\nVERDICT: PASS' } } },
+    })
+    // Untracked, non-ignored caches from earlier runs (no .gitignore entry for them).
+    for (const dir of ['__pycache__', 'node_modules/.cache', '.venv/lib']) mkdirSync(join(p.repo, dir), { recursive: true })
+    p.write('__pycache__/mod.cpython-313.pyc', 'stale\n')
+    p.write('node_modules/.cache/babel.json', 'stale\n')
+    p.write('.venv/lib/site.pyc', 'stale\n')
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      const r = await callTool(p, client, 'submit', {})
+      assert.match(r.text, /VERDICT: PASS \(generation 1/)
+      assert.doesNotMatch(r.text, /does not count as current|pre-existing path/)
+      assert.match(r.text, /Next: call learn/)
+      assert.match((await callTool(p, client, 'status', {})).text, /last verdict PASS \(current\)/)
+      const learn = await callTool(p, client, 'learn', {})
+      assert.equal(learn.isError, undefined, learn.text)
+    })
+    // Derived caches are neither restored nor moved aside: the Verifier's fresh versions stay.
+    assert.equal(p.read('__pycache__/mod.cpython-313.pyc'), 'fresh')
+    const [entry] = verifierLog(p)
+    assert.ok(entry.envKeys.includes('PYTHONDONTWRITEBYTECODE'), 'the Verifier runs Python without bytecode writes')
+  })
+
+  it('a real stale __pycache__ never voids the PASS of the Verifier that imports the module (r3-interactive-1)', { skip: !hasPython }, async () => {
+    const p = await project({
+      files: { 'README.md': '# demo\n', 'mod.py': 'X = 1\n' },
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'python3 -c "import mod; print(mod.X)"' }], text: 'mod.X is 2 as requested.\nVERDICT: PASS' } } },
+    })
+    execFileSync('python3', ['-c', 'import mod'], { cwd: p.repo, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '' } })
+    const pyc = readdirSync(join(p.repo, '__pycache__')).find(n => n.endsWith('.pyc'))
+    assert.ok(pyc, 'a bytecode cache from an earlier run')
+    const stale = readFileSync(join(p.repo, '__pycache__', pyc))
+    await userSays(p, 'Set X in mod.py to 2')
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    p.write('mod.py', 'X = 2\n')
+    await withClient(p, async client => {
+      const r = await callTool(p, client, 'submit', {})
+      assert.match(r.text, /VERDICT: PASS \(generation 1/)
+      assert.doesNotMatch(r.text, /does not count as current/)
+      assert.equal((await callTool(p, client, 'learn', {})).isError, undefined)
+    })
+    assert.deepEqual(readFileSync(join(p.repo, '__pycache__', pyc)), stale, 'the Verifier wrote no bytecode')
+  })
+
+  it('a PASS voided again by the same files on the same candidate names the real remedy instead of "submit again" (r3-interactive-1)', async () => {
+    const p = await project({
+      files: { 'README.md': '# demo\n', 'src/app.txt': 'version 1\n', 'package-lock.json': '{"name":"demo","lockfileVersion":2}\n' },
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { default: { actions: [
+        { tool: 'Bash', command: 'printf \'{"name":"demo","lockfileVersion":3}\\n\' > package-lock.json; cat src/app.txt' },
+      ], text: 'src/app.txt says version 2 as requested.\nVERDICT: PASS' } } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      const first = await callTool(p, client, 'submit', {})
+      assert.match(first.text, /VERDICT: PASS \(generation 1/)
+      assert.match(first.text, /call submit again for a verdict that does/)
+      const second = await callTool(p, client, 'submit', {})
+      assert.match(second.text, /VERDICT: PASS \(generation 2/)
+      assert.match(second.text, /package-lock\.json/)
+      assert.match(second.text, /also changed during the previous inspection of this same, unchanged candidate, so submitting it again unchanged would be voided the same way/)
+      assert.match(second.text, /commit the regenerated file, for example the updated lockfile/)
+      assert.doesNotMatch(second.text, /call submit again for a verdict that does/)
+    })
+    const [job1, job2] = jobsOf(p)
+    assert.equal(job1.result.candidateDigest, job2.result.candidateDigest)
+  })
+
+  it('the not-current note claims the candidate is back only after checking it at delivery; paths rewritten after the restore are named (r3-interactive-7)', async () => {
+    // A detached writer the Verifier leaves behind keeps rewriting src/app.txt until the test stops it.
+    const stop = join(tmpdir(), `cc-rsi-writer-stop-${randomUUID()}`)
+    const writer = `i=0; while [ ! -e ${stop} ] && [ $i -lt 600 ]; do i=$((i+1)); echo writer-$i > src/app.txt; sleep 0.05; done`
+    const p = await project({
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { default: { actions: [{ tool: 'Bash', command:
+        `setsid nohup sh -c '${writer}' >/dev/null 2>&1 < /dev/null & while ! grep -q writer src/app.txt; do sleep 0.02; done; cat src/app.txt` }],
+      text: 'ok.\nVERDICT: PASS' } } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      const r = await callTool(p, client, 'submit', {})
+      assert.match(r.text, /VERDICT: PASS \(generation 1/)
+      assert.match(r.text, /does not count as current/)
+      assert.doesNotMatch(r.text, /holds your candidate again|match your candidate again now/)
+      assert.match(r.text, /differ from your candidate again now \([^)]*\): src\/app\.txt|HARNESS NOTE: \d+ path\(s\) were changed again by something outside the inspection after the restore: src\/app\.txt/)
+    })
+    writeFileSync(stop, '')
+    await new Promise(resolve => setTimeout(resolve, 300))
+    rmSync(stop, { force: true })
+  })
+
+  it('only an inspected tree is a "changed since" baseline: a fresh context after an infra-only generation hears of no earlier inspection (r3-interactive-4)', async () => {
+    const p = await project({
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { turns: [{ apiError: { status: 401, error: 'authentication_failed' } }], default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'Looks right.\nVERDICT: PASS' } } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2 and update the README')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      assert.match((await callTool(p, client, 'submit', {})).text, /^INFRASTRUCTURE: .*\(auth\)/)
+      p.write('README.md', '# demo v2\n')
+      await callTool(p, client, 'submit', {})
+    })
+    const prompts = orderedPrompts(p)
+    assert.equal(prompts.length, 2)
+    for (const { text } of prompts) assert.doesNotMatch(text, /CHANGED SINCE|since the last (published )?inspection|since your last inspection/)
+    const manifests = layouts(p).sl.manifests
+    assert.equal(existsSync(manifests) ? readdirSync(manifests).length : 0, 0, 'no tree was inspected, so no baseline was recorded')
+  })
+
+  it('a reused context hears what changed since the tree IT last inspected, not since a generation that never reached it (r3-interactive-4)', async () => {
+    const p = await project({
+      files: { 'README.md': '# demo\n', 'src/app.txt': 'version 1\n', 'src/other.txt': 'intact\n' },
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { turns: [
+        { actions: [{ tool: 'Bash', command: 'cat src/app.txt' }], text: 'src/app.txt still says version 1.\nVERDICT: FAIL' },
+        { apiError: { status: 401, error: 'authentication_failed' } },
+        { actions: [{ tool: 'Bash', command: 'cat src/app.txt' }], text: 'Now version 2.\nVERDICT: PASS' },
+      ] } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2')
+    await withClient(p, async client => {
+      assert.match((await callTool(p, client, 'submit', {})).text, /VERDICT: FAIL \(generation 1/)
+      p.write('src/app.txt', 'version 2\n')
+      p.write('src/other.txt', 'broken\n')
+      assert.match((await callTool(p, client, 'submit', {})).text, /^INFRASTRUCTURE: .*\(auth\)/)
+      p.write('README.md', '# demo v2\n')
+      assert.match((await callTool(p, client, 'submit', {})).text, /VERDICT: PASS \(generation 3/)
+    })
+    const prompts = orderedPrompts(p)
+    assert.equal(prompts.length, 3)
+    assert.ok(prompts.every(pr => pr.key === 'task-1-v1'), 'one reused context')
+    const section = /CHANGED SINCE YOUR LAST INSPECTION[^\n]*\n---\n([\s\S]*?)\n---/.exec(prompts[2].text)
+    assert.ok(section, prompts[2].text)
+    // Since generation 1, the last tree this context saw (generation 2 never reached it).
+    assert.equal(section[1], 'FILE-CHANGE EVIDENCE since your last inspection:\nMODIFIED (3):\n  README.md\n  src/app.txt\n  src/other.txt')
+  })
+
+  it('a fresh context on the same model hears of the last published inspection, never of "an earlier context, not you" (r3-interactive-6)', async () => {
+    const p = await project({
+      config: { isolation: { sandbox: 'off' }, interactive: { verifierIdleHours: 0.000001 } },
+      script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'src/app.txt still says version 1.\nVERDICT: FAIL' } } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 1.5\n')
+    await withClient(p, async client => {
+      assert.match((await callTool(p, client, 'submit', {})).text, /generation 1/)
+      p.write('src/app.txt', 'version 2\n')
+      assert.match((await callTool(p, client, 'submit', {})).text, /generation 2/)
+    })
+    const [, job2] = jobsOf(p)
+    assert.deepEqual({ fresh: job2.verifier.fresh, handover: job2.verifier.handover }, { fresh: true, handover: 'self' })
+    const second = orderedPrompts(p).find(pr => pr.key === 'task-1-v2').text
+    assert.match(second, /Your prior investigations remain yours\./)
+    assert.match(second, /YOUR PRIOR PUBLISHED REPORTS ON EARLIER GENERATIONS/)
+    assert.match(second, /CHANGED SINCE THE LAST PUBLISHED INSPECTION \(harness file comparison, not a grade\):\n---\nFILE-CHANGE EVIDENCE since the last published inspection:\nMODIFIED \(1\):\n  src\/app\.txt/)
+    assert.doesNotMatch(second, /not by you|earlier Verifier context|YOUR LAST INSPECTION/)
   })
 })

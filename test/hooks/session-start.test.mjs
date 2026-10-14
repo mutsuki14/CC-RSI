@@ -2,12 +2,14 @@
 // compact task pin, session.json + index, read-only view, notices, dead-job recovery.
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { writeJsonAtomic } from '../../lib/core/atomic.mjs'
 import { MemoryStore } from '../../lib/memory/store.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
+import { writeAttestation } from '../../lib/interactive/attest.mjs'
 import { MCP_OPT_PREFIX, effectiveConfig, pluginCodeFingerprint, sessionContext } from '../../lib/interactive/session.mjs'
 import { callTool } from '../../lib/mcp/tools.mjs'
 import { ROOT, deadPid, fixture, hook, layouts, setupProject, taskState, until } from '../interactive/harness.mjs'
@@ -28,6 +30,7 @@ async function seedMemory(p, files) {
 describe('SessionStart hook', () => {
   it('injects the protocol and the memory preamble (≤ 9000 chars) and records the session', async () => {
     const p = await setupProject()
+    delete p.env.CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL // no Verifier model saved: it inherits
     // Claude Code exports CLAUDE_PLUGIN_ROOT to plugin hooks; the shim refresh needs it.
     const r = await hook('session-start', fixture('session-start', p), { ...p.env, CLAUDE_PLUGIN_ROOT: ROOT })
     assert.equal(r.code, 0, r.stderr)
@@ -120,14 +123,71 @@ describe('SessionStart hook', () => {
     await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
     assert.match((await start('fork')).json.systemMessage, changed)
     assert.equal(recorded(), pluginCodeFingerprint(ROOT))
-    // Within one process (compaction, /clear) the baseline stays.
+    // Within one process a compaction keeps the baseline.
     await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
-    await start('clear')
+    await start('compact')
     assert.equal(recorded(), 'f'.repeat(64))
+  })
+
+  it('/clear (a new session id in the same process) never accepts code the running MCP server did not load (r3-interactive-8)', async () => {
+    const p = await setupProject({ script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'VERDICT: PASS' } } } })
+    await hook('session-start', fixture('session-start', p), p.env)
+    // The plugin code was edited in place after the MCP server loaded it (its startup fingerprint
+    // no longer matches the disk); then the user types /clear: Claude Code sends SessionStart with
+    // source "clear" and a NEW session id, so that session's record is taken afresh from disk.
+    const loaded = 'f'.repeat(64)
+    const cleared = { ...p, sid: randomUUID() }
+    const r = await hook('session-start', fixture('session-start', cleared, { extra: { source: 'clear' } }), p.env)
+    assert.equal(r.code, 0, r.stderr)
+    const record = JSON.parse(readFileSync(layouts(p, cleared.sid).sl.sessionJson, 'utf8'))
+    assert.equal(record.pluginFingerprint, pluginCodeFingerprint(ROOT), 'the new session id records the code on disk')
+    await hook('prompt', fixture('user-prompt-submit', cleared), p.env)
+    // The server still runs the code it loaded: submit refuses (no job), whatever the new record says.
+    const id = `toolu_${randomUUID().replace(/-/g, '')}`
+    await writeAttestation(layouts(p).g.att, { tool_use_id: id, tool_name: 'mcp__plugin_cc-rsi_rsi__submit', session_id: cleared.sid, cwd: p.repo })
+    const refused = await callTool('submit', {}, { meta: { 'claudecode/toolUseId': id }, env: p.env, loadedFingerprint: loaded })
+    assert.equal(refused.isError, true)
+    assert.match(refused.content[0].text, /\(plugin_changed\)/)
+    assert.match(refused.content[0].text, /Restart Claude Code/)
+    assert.equal(existsSync(layouts(p, cleared.sid).sl.jobs) ? readdirSync(layouts(p, cleared.sid).sl.jobs).length : 0, 0, 'no verification job')
+  })
+
+  it('a resumed process never takes its transcript model from records an earlier process wrote (r3-interactive-3)', async () => {
+    const p = await setupProject()
+    const { sl } = layouts(p)
+    const session = () => JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
+    const transcript = join(p.home, 'transcript.jsonl') // the fixtures' transcript_path
+    const turn = model => `${JSON.stringify({ type: 'assistant', message: { model, role: 'assistant', content: [] } })}\n`
+    // Process 1 ran on haiku; its Stop recorded the model from the transcript.
+    await hook('session-start', fixture('session-start', p), p.env)
+    assert.deepEqual(session().modelWatermark, { path: transcript, offset: 0, at: session().modelWatermark.at })
+    writeFileSync(transcript, `${JSON.stringify({ type: 'user', message: { content: 'go' } })}\n${turn('claude-haiku-5-5')}`)
+    await hook('stop', fixture('stop', p), p.env)
+    assert.equal(session().model, 'claude-haiku-5-5')
+    // `claude --resume <id> --model sonnet`: a new process, which records where its records begin.
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'resume' } }), p.env)
+    assert.equal(session().model, null)
+    assert.equal(session().modelWatermark.offset, statSync(transcript).size)
+    // Its first turn calls a cc-rsi tool: at PreToolUse its own assistant record is not flushed yet,
+    // so the transcript ends with process 1's haiku record. Nothing is recorded.
+    const att = await hook('attest', fixture('pre-tool-use-mcp', p), p.env)
+    assert.equal(att.code, 0, att.stderr)
+    assert.equal(session().model, null, 'the earlier process\'s model is never recorded as this process\'s')
+    // The turn's record lands; the next Stop records the new process's model.
+    appendFileSync(transcript, turn('claude-sonnet-5-5'))
+    await hook('stop', fixture('stop', p), p.env)
+    assert.equal(session().model, 'claude-sonnet-5-5')
+    assert.equal(session().modelSource, 'transcript')
+    // A compaction keeps the process, its model and its watermark.
+    const mark = session().modelWatermark
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'compact' } }), p.env)
+    assert.equal(session().model, 'claude-sonnet-5-5')
+    assert.deepEqual(session().modelWatermark, mark)
   })
 
   it('the MCP server applies the options the hooks see, not the substituted manifest defaults', async () => {
     const p = await setupProject({ config: { isolation: { sandbox: 'require' }, interactive: { stopPolicy: 'gate' } } })
+    delete p.env.CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL // no option saved at all
     const r = await hook('session-start', fixture('session-start', p), p.env)
     const banner = /^cc-rsi: Verifier isolation = (\w+) /.exec(r.json.systemMessage)[1]
     const { sl } = layouts(p)
@@ -142,12 +202,13 @@ describe('SessionStart hook', () => {
     const status = await callTool('status', {}, { env: { ...mcpEnv, CLAUDE_CODE_SESSION_ID: p.sid } })
     const line = status.content[0].text.split('\n').find(l => l.startsWith('isolation: '))
     assert.match(line, new RegExp(`^isolation: Verifier ${banner} \\(`))
-    // An option the user saved reaches both sides; a non-default env value the record lacks still counts.
+    // An option the user saved reaches both sides; an env value the record lacks does not count: the
+    // record is complete (r3-interactive-5).
     const saved = { ...p.env, CLAUDE_PLUGIN_OPTION_SANDBOX: 'off' }
     await hook('session-start', fixture('session-start', p, { extra: { source: 'resume' } }), saved)
-    const again = await sessionContext({ payload: { session_id: p.sid, cwd: p.repo }, env: { ...mcpEnv, CC_RSI_OPT_SANDBOX: 'off', CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model' }, optPrefix: MCP_OPT_PREFIX, create: false })
+    const again = await sessionContext({ payload: { session_id: p.sid, cwd: p.repo }, env: { ...mcpEnv, CC_RSI_OPT_SANDBOX: 'off', CC_RSI_OPT_VERIFIER_MODEL: 'stale-model' }, optPrefix: MCP_OPT_PREFIX, create: false })
     assert.equal(again.config.isolation.sandbox, 'off')
-    assert.equal(again.config.models.verifier, 'test-verifier-model')
+    assert.equal(again.config.models.verifier, '')
     assert.equal(again.config.interactive.stopPolicy, 'gate')
   })
 

@@ -8,7 +8,9 @@ import { chmod, lstat, mkdir, readFile, readdir, readlink, stat, symlink, utimes
 import { join } from 'node:path'
 import test from 'node:test'
 import { tmpDir, unprivilegedSkip } from '../_helpers/tmp.mjs'
-import { copyTree, listTree, makeReadOnly, makeWritable, moveAside, removeTree, sortPaths } from '../../lib/workspace/copy.mjs'
+import {
+  copyTree, listTree, makeReadOnly, makeWritable, moveAside, moveTree, removeTree, retireTree, sortPaths, sweepTrash,
+} from '../../lib/workspace/copy.mjs'
 
 async function sampleTree() {
   const base = await tmpDir()
@@ -137,6 +139,72 @@ test('moveAside numbers attempts, reserves slots, and returns null for a missing
   const targets = await Promise.all([0, 1, 2, 3, 4, 5].map(i => moveAside(join(base, `c${i}`), into)))
   assert.equal(new Set(targets).size, 6)
   assert.deepEqual((await readdir(into)).filter(n => n.startsWith('attempt_')).length, 8)
+})
+
+test('retireTree never leaves a half-deleted tree; moveTree copies across filesystems into a complete dest (r3-engine-concurrency-1/-2)', async () => {
+  const fsp = (await import('node:fs/promises')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+  const base = await tmpDir()
+  const tree = async (dir, names) => {
+    await mkdir(join(dir, 'sub'), { recursive: true })
+    for (const name of names) await writeFile(join(dir, 'sub', name), name)
+  }
+  const ckpt = join(base, 'ckpt')
+  await tree(ckpt, ['a', 'b', 'c'])
+  await retireTree(ckpt)
+  assert.deepEqual(await readdir(base), [])
+  await retireTree(ckpt) // a missing path is a no-op
+  const src = join(base, 'work', 'root')
+  const dest = join(base, 'priv', 'slot')
+  await tree(src, ['a', 'b', 'c'])
+  const { rename, rm } = fsp
+  let crash = true
+  // Different filesystems; the process dies while it deletes the copied source (one file, then a crash).
+  fsp.rename = async (from, to) => {
+    if (from === src && to === dest) throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' })
+    return rename(from, to)
+  }
+  fsp.rm = async (path, options) => {
+    if (crash && String(path).startsWith(`${src}.trash-`)) {
+      crash = false
+      await rm(join(String(path), 'sub', 'a'), { force: true })
+      throw new Error('injected crash while deleting the moved source')
+    }
+    return rm(path, options)
+  }
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(moveTree(src, dest), /injected crash/)
+  } finally {
+    fsp.rename = rename
+    fsp.rm = rm
+    syncBuiltinESMExports()
+  }
+  assert.equal(existsSync(src), false, 'the source is either complete or gone')
+  assert.deepEqual(sortPaths(await readdir(join(dest, 'sub'))), ['a', 'b', 'c'])
+  assert.equal(existsSync(`${dest}.tmp`), false)
+  assert.equal((await readdir(join(base, 'work'))).filter(name => name.startsWith('root.trash-')).length, 1)
+  await sweepTrash(src)
+  assert.deepEqual(await readdir(join(base, 'work')), [])
+  // A stale partial `<dest>.tmp` is never renamed into place.
+  const other = join(base, 'work', 'other')
+  await tree(other, ['x'])
+  await mkdir(`${dest}2.tmp`, { recursive: true })
+  await writeFile(join(`${dest}2.tmp`, 'partial'), 'p')
+  fsp.rename = async (from, to) => {
+    if (from === other && to === `${dest}2`) throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' })
+    return rename(from, to)
+  }
+  syncBuiltinESMExports()
+  try {
+    await moveTree(other, `${dest}2`)
+  } finally {
+    fsp.rename = rename
+    syncBuiltinESMExports()
+  }
+  assert.deepEqual(await readdir(`${dest}2`), ['sub'])
+  assert.deepEqual(await readdir(join(`${dest}2`, 'sub')), ['x'])
+  assert.equal(existsSync(other), false)
 })
 
 test('makeReadOnly clears every write bit (directories after children); makeWritable restores owner write', async () => {

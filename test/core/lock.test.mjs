@@ -2,6 +2,7 @@
 // Node processes.
 
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
@@ -215,6 +216,32 @@ describe('LeaseLock', () => {
     assert.ok(Date.now() - started < 2000)
     await again.release()
     assert.deepEqual((await readdir(dir)).sort(), [], 'no guard, aside or temporary file is left behind')
+  })
+
+  it('the release of a sticky record outlasts a stopped holder\'s guard instead of leaving the record forever (r3-engine-concurrency-3)', async () => {
+    const dir = await tmpDir()
+    const path = join(dir, 'x.lock')
+    const guard = `${path}.takeover`
+    const sticky = holder => holder?.owner?.checkpointOpen === true
+    const lock = new LeaseLock(path, { owner: { checkpointOpen: true }, sticky, pollMs: 20 })
+    assert.equal(await lock.acquire(), true)
+    // A guard named by a live process of this machine that stopped inside its critical section 48 s
+    // ago (or whose pid was reused): it is broken only once it is 60 s old, after the 10 s guard wait.
+    const holder = spawn('sleep', ['120'], { stdio: 'ignore' })
+    try {
+      await writeFile(guard, JSON.stringify({ pid: holder.pid, host: hostname(), nonce: 'stopped:1' }))
+      const old = new Date(Date.now() - 48_000)
+      await utimes(guard, old, old)
+      const started = Date.now()
+      const out = await lock.release()
+      const took = Date.now() - started
+      assert.deepEqual(out, { removed: true, timedOut: false })
+      assert.ok(took > 10_000, `the sticky release waited past the ordinary guard wait (${took} ms)`)
+      assert.equal(existsSync(path), false, 'the sticky record never outlives its release')
+      assert.equal(existsSync(guard), false)
+    } finally {
+      holder.kill('SIGKILL')
+    }
   })
 
   it('a crash-left guard of a dead pid here is broken at once; a future-dated one never outlives waitMs (r2-concurrency-5)', async () => {

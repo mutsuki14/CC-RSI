@@ -297,6 +297,57 @@ describe('broad lineage', () => {
       const restarted = (await protocolEvents(dir)).filter(ev => ev.type === 'PROJECT_RESTARTED_UNSCORED')
       assert.deepEqual(restarted.map(ev => ev.cls), ['crash'])
     })
+
+    it('archives the root across filesystems, and completes after a crash while the copied root is deleted (r3-engine-concurrency-2)', async () => {
+      const ref = await referenceRun()
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      const root = e.layout('ab').projectRoot('w001-alpha')
+      const slot = join(e.layout('ab').priv, 'w001', 'projects', 'alpha', 'infra_attempts', 'attempt_001')
+      const fsp = (await import('node:fs/promises')).default
+      const { syncBuiltinESMExports } = await import('node:module')
+      const { rename, rm } = fsp
+      let exdev = 0
+      let crash = true
+      // The work tree sits on another filesystem than the lineage records: the root cannot be renamed into its slot.
+      fsp.rename = async (from, to) => {
+        if (String(from) === root && String(to) === slot) {
+          exdev++
+          throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' })
+        }
+        return rename(from, to)
+      }
+      // The engine dies while it deletes the copied root: one file gone, then a crash.
+      fsp.rm = async (path, options) => {
+        if (crash && String(path).startsWith(`${root}.trash-`)) {
+          crash = false
+          await rm(join(String(path), 'input.txt'), { force: true })
+          throw new Error('injected crash while deleting the copied root')
+        }
+        return rm(path, options)
+      }
+      syncBuiltinESMExports()
+      let first
+      let second
+      try {
+        first = await run(e, dir)
+        assert.equal(first.status, 'paused_infra')
+        assert.equal(exdev, 1)
+        assert.equal(crash, false, 'the copied root was being deleted')
+        assert.equal(existsSync(root), false, 'the root is retired by a rename: it is never left half-deleted')
+        assert.equal(readFileSync(join(slot, 'input.txt'), 'utf8'), 'alpha\n', 'the slot holds the complete copy')
+        second = await resumeToEnd(e, dir)
+      } finally {
+        fsp.rename = rename
+        fsp.rm = rm
+        syncBuiltinESMExports()
+      }
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const receipt = await assertCompletedLikeReference(e, dir, ref)
+      assert.equal(receipt.moved, slot)
+      assert.equal(receipt.cls, 'crash')
+      assert.deepEqual(readdirSync(join(root, '..')).filter(name => name.includes('.trash-')), [], 'no trash is left behind')
+    })
   })
 
   it('puts the Actor tree back before archiving an attempt whose Verifier crashed mid-inspection', async () => {

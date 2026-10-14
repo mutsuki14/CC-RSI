@@ -92,7 +92,7 @@ export PATH="$HOME/.cc-rsi/bin:$PATH"
 cc-rsi: Verifier isolation = rollback (sandbox unavailable: bubblewrap (bwrap) not installed, socat not installed); Verifier model = inherit (session model not yet known); memory 12 files (learn)
 ```
 
-在 Claude Code 2.1.296 上，SessionStart 的输入不带模型信息，所以 cc-rsi 会在第一次调用 cc-rsi 工具或第一次结束时从会话的对话记录里读出会话模型，并一直沿用到下一次会话启动或 `/model`（由别的模型完成的轮次，比如计划模式或降级轮次，不会改变它）；在此之前，继承会话模型的验证者显示为 `inherit (session model not yet known)`。只有当验证者模型和会话模型都已知且相同时，这一行末尾才会追加 `; WARNING: Verifier model equals the session model`。如果记忆在提交之外被改动过，也会追加一条警告。
+在 Claude Code 2.1.296 上，SessionStart 的输入不带模型信息，所以 cc-rsi 会在第一次调用 cc-rsi 工具或第一次结束时从会话的对话记录里读出会话模型，并一直沿用到下一次会话启动或 `/model`（由别的模型完成的轮次，比如计划模式或降级轮次，不会改变它）。只有当前这个 Claude Code 进程写下的记录才算数：`--resume`、`--continue` 或分叉之后，之前那个进程写下的记录（可能是在另一个 `--model` 下写的）会被跳过，所以第一轮里模型还未知，由下一次结束时记下。在此之前，继承会话模型的验证者显示为 `inherit (session model not yet known)`，并使用链条上的下一个模型（`ANTHROPIC_MODEL`、`~/.claude/settings.json` 里的 `model`、Claude Code 的默认模型）。只有当验证者模型和会话模型都已知且相同时，这一行末尾才会追加 `; WARNING: Verifier model equals the session model`。如果记忆在提交之外被改动过，也会追加一条警告。
 
 Claude 完成一项不简单的任务后会调用 cc-rsi 的 `submit` 工具，你会看到它收到的判定：
 
@@ -119,9 +119,9 @@ cc-rsi · Verifier: VERDICT: FAIL (generation 1, isolation=rollback, model=claud
   → memory_commit      （新的确认码）原子提交：写入日志，并记录提交前后的树哈希
 ```
 
-- **你的消息**指的是你亲手输入的提示（UserPromptSubmit 的 `source` 为 `user`，`-p` 运行时为 `sdk`）。任务通知、队友和频道消息、斜杠命令、其他由机器注入的轮次，以及 Claude 为自己安排的提示（CronCreate、ScheduleWakeup、RemoteTrigger、`/loop`）都不会被采集，因此永远不会成为验证者的任务。负载里有 `source` 时以它为准；没有时，只有 Claude Code 完整的包装格式才会被认作队友或频道消息，所以你以 `<channel>` 开头的提示仍然算你的。安排的提示只有在安排调用成功后才会被记下；一次性的提示只认一次，你删除的、已经触发或过期的安排，不会再让你亲手输入的同样文本被漏掉。
-- **同一个验证者会话**只有在以下条件都满足时才会被恢复：它的对话记录与上一个作业结束时完全一致（cc-rsi 在每个作业结束后记录一份指纹）、验证者模型没有变化、闲置时间不超过 `interactive.verifierIdleHours`。否则会开启新的验证者上下文，并附上之前的报告。
-- **`submit` 之前启动的进程**（后台 Bash 任务、开发服务器）会继续运行；暂停只针对 Claude 新发起的编辑和命令。在沙箱模式的检查期间，验证者自己无法改动候选结果，所以一旦候选结果发生变化，作业就以基础设施结果 `candidate_changed_during_inspection` 结束，不产生判定。在回滚模式下，如果检查期间已有文件被改动（仅新建的文件不算），得到的 `PASS` 仍会记录，但永远不算当前有效，结果里会附一条 NOTE 说明。`submit` 之前请先停掉这类进程。
+- **你的消息**指的是你亲手输入的提示（UserPromptSubmit 的 `source` 为 `user`，`-p` 运行时为 `sdk`）。任务通知、队友和频道消息、斜杠命令、其他由机器注入的轮次，以及 Claude 为自己安排的提示（CronCreate、ScheduleWakeup、RemoteTrigger、`/loop`）都不会被采集，因此永远不会成为验证者的任务。负载里有 `source` 时以它为准；没有时，只有 Claude Code 完整的包装格式才会被认作队友或频道消息，所以你以 `<channel>` 开头的提示仍然算你的。安排的提示只有在安排调用成功后才会被记下；一次性的提示只认一次，你删除的、已经触发或过期的安排，不会再让你亲手输入的同样文本被漏掉。只有某个任务列表曾经列出过、之后又不再列出的安排才算已经消失：会话任务以 Claude Code 传给结束钩子的任务列表为准，持久的 CronCreate 任务以 `<project>/.claude/scheduled_tasks.json` 为准；还没有任何列表列出过的安排，在被删除之前、最多 8 天内都会被认出。
+- **同一个验证者会话**只有在以下条件都满足时才会被恢复：它的对话记录与上一个作业结束时完全一致（cc-rsi 在每个作业结束后记录一份指纹）、验证者模型没有变化、闲置时间不超过 `interactive.verifierIdleHours`。否则会开启新的验证者上下文，并附上之前的报告，以及自最近一次发布了报告的检查以来改了什么（被恢复的验证者听到的是自它自己上次检查的那棵树以来改了什么）。
+- **`submit` 之前启动的进程**（后台 Bash 任务、开发服务器）会继续运行；暂停只针对 Claude 新发起的编辑和命令。在沙箱模式的检查期间，验证者自己无法改动候选结果，所以一旦候选结果发生变化，作业就以基础设施结果 `candidate_changed_during_inspection` 结束，不产生判定。在回滚模式下，如果检查期间已有文件被改动（仅新建的文件不算，`node_modules`、`.venv` 和 `__pycache__` 下未跟踪的文件也不算），得到的 `PASS` 仍会记录，但永远不算当前有效，结果里会附一条 NOTE 说明。`submit` 之前请先停掉这类进程。
 
 每次 `submit` 或 `wait_verdict` 最多等待约 100 秒（`interactive.waitSeconds`），并且会及早结束等待，以便在 Claude Code 把调用转入后台之前约 10 秒返回（`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`，默认 120 秒，从调用到达时算起）。验证时间更长时，结果会显示 `VERIFICATION RUNNING (job …)`，Claude 随后调用 `wait_verdict`；判定落地时，一个异步钩子也会尝试唤醒会话（每个作业一次）。验证进行期间，读取文件不受影响。
 
@@ -135,7 +135,7 @@ cc-rsi · Verifier: VERDICT: FAIL (generation 1, isolation=rollback, model=claud
 | `memory_commit` | `{confirm: "<确认码>"}` 推进学习阶段（先调和，再提交）；`{abandon: true}` 丢弃草稿，不需要确认码。 | 主对话，学习阶段已打开 |
 | `status` | 会话与项目状态（只读）。 | 主对话及其子智能体 |
 
-每次会改变状态的调用，都必须由插件的 PreToolUse 钩子针对同一个 `tool_use_id` 做过认证。钩子没有生效时，`submit` 会拒绝执行，也不会启动任何验证。主会话的子智能体调用会被拒绝。如果插件代码自会话启动以来发生了变化，`submit` 也会以基础设施结果 `plugin_changed` 拒绝，不启动作业（见[隔离](#隔离哪些受保护哪些不受保护)）。
+每次会改变状态的调用，都必须由插件的 PreToolUse 钩子针对同一个 `tool_use_id` 做过认证。钩子没有生效时，`submit` 会拒绝执行，也不会启动任何验证。主会话的子智能体调用会被拒绝。如果磁盘上的插件代码不同于会话启动时的代码，或不同于正在运行的 MCP 服务器加载的代码，`submit` 也会以基础设施结果 `plugin_changed` 拒绝，不启动作业（见[隔离](#隔离哪些受保护哪些不受保护)）。
 
 ### 结束策略
 
@@ -147,7 +147,7 @@ cc-rsi · Verifier: VERDICT: FAIL (generation 1, isolation=rollback, model=claud
 
 后台任务运行期间，每种情况最多提示一次，这条提示从不阻止结束，也不计入 `gate` 的次数；后台工作结束后再给出通常的提醒。在 `nudge` 策略下以及对后台提示而言，由提醒本身引发的结束（`stop_hook_active`）不会再次被提醒。
 
-只有当工作区的 git 状态摘要与检查时记录的一致，判定才算*当前*有效。过期的 `PASS` 不算数，`learn` 也会拒绝过期的判定。回滚模式下检查期间已有文件被改动的 `PASS`，无论改动来自验证者自己的命令（例如安装时改写了锁文件、测试时写入了快照）还是其他进程，从一开始就记为非当前有效：它的结果不带学习提示，`learn` 会拒绝它，状态里显示 `not current: the candidate changed during the inspection`。回滚模式下的验证者会被要求让已有文件保持逐字节不变，并在自己的临时目录里用副本做实验。
+只有当工作区的 git 状态摘要与检查时记录的一致，判定才算*当前*有效。`node_modules`、`.venv` 和 `__pycache__` 下未跟踪的文件是派生缓存，不是候选内容：它们不计入这个摘要，也不进检查点（那里被跟踪的文件仍然算数），所以验证者的 `import` 或测试运行改写了缓存，不会让它的判定作废；验证者运行时还设置了 `PYTHONDONTWRITEBYTECODE=1`。过期的 `PASS` 不算数，`learn` 也会拒绝过期的判定。回滚模式下检查期间已有文件被改动的 `PASS`，无论改动来自验证者自己的命令（例如安装时改写了锁文件、测试时写入了快照）还是其他进程，从一开始就记为非当前有效：它的结果不带学习提示，`learn` 会拒绝它，状态里显示 `not current: the candidate changed during the inspection`。结果送达时，cc-rsi 会再检查一遍被恢复的文件：只有它们确实与候选结果一致时，NOTE 才这么说，否则会列出又出现差异的文件。如果同一批文件连续两次让同一个未改动候选结果的 `PASS` 作废，NOTE 会指出解决办法（提交重新生成的文件，比如更新后的锁文件；把缓存加进 `.gitignore` 或删掉它；停掉写这些文件的后台命令），而不是让 Claude 再 `submit` 一次。回滚模式下的验证者会被要求让已有文件保持逐字节不变，并在自己的临时目录里用副本做实验。
 
 ### 技能
 
@@ -250,7 +250,7 @@ cc-rsi explore abandon <id> [--reason TEXT]   # 仅限人工；记录结束方�
 它们分别对应 `models.verifier`、`interactive.stopPolicy` 和 `isolation.sandbox`，构成下文优先级中的“插件选项”一层。只有你保存过的选项才算数；保存之前，更低的各层（包括 `~/.cc-rsi/config.json`）生效。cc-rsi 的各个部分从 Claude Code 提供它们的地方读取：
 
 - **钩子**通过 `CLAUDE_PLUGIN_OPTION_*` 收到已保存的选项。SessionStart 会把它们记进会话记录；会话中途修改选项时，提示钩子和认证钩子会再次记录，所以下一次 `submit` 就用新值。
-- **MCP 服务器**使用记录下来的选项。对于没有保存的选项，Claude Code 也会把清单里的默认值放进服务器的环境变量（`CC_RSI_OPT_*`）；这样的值只有在不同于清单默认值时才算数，所以服务器、钩子和会话启动时的状态行看到的配置一致。服务器环境里的值既不同于记录也不同于默认值时（你修改选项后服务器重新连接），以它为准。
+- **MCP 服务器**使用记录下来的选项。只要有钩子记录过，这份记录就是完整的，服务器自己的环境变量（`CC_RSI_OPT_*`）会被忽略：这些环境变量在服务器启动时就定下了，可能已经过时，而且对于没有保存的选项，Claude Code 也会把清单里的默认值放进去。因此过时的值永远不会覆盖你后来保存的选项（旧的 `sandbox=off` 不会把已保存的 `require` 降级），你清除的选项也保持清除。只有在没有任何钩子记录过选项时（钩子没有运行），服务器才使用自己的环境变量，并去掉与清单默认值相同的值，这样服务器、钩子和会话启动时的状态行看到的配置一致。
 - **`cc-rsi` 命令行工具**（无论在终端还是技能里）读取 Claude Code 保存在 `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` 中 `pluginConfigs` 下的选项：优先取当前插件来源市场对应的 `cc-rsi@<marketplace>` 条目；插件从目录运行（`--plugin-dir`）时取 `cc-rsi@inline`；都没有时取唯一的 cc-rsi 条目。任何一个 cc-rsi 条目里保存了 `sandbox: require` 都会生效。环境中的 `CLAUDE_PLUGIN_OPTION_*` 会覆盖保存的值。没有配置警告时，`cc-rsi doctor` 会在 `config` 这一行列出实际采用的选项及其来源。
 
 ### JSON 配置
@@ -338,7 +338,7 @@ cc-rsi explore abandon <id> [--reason TEXT]   # 仅限人工；记录结束方�
 > [!WARNING]
 > **没有操作系统沙箱时，验证者和所有谱系子进程会以你的用户身份、在无人值守的情况下执行 Bash 命令，保护措施只有回滚和启发式规则。** Claude Code 沙箱在 Linux 上需要 `bubblewrap` 和 `socat`（macOS 上需要 `sandbox-exec`），在 WSL1 和很多容器里都不可用。此时：
 >
-> - 交互验证者降级为 `rollback`（会话启动时会提示）。在 git 仓库里，回滚恢复工作区根目录下被 git 跟踪、以及未跟踪且未被忽略的文件；在 git 之外，恢复除 `.git`、`node_modules`、`.venv` 和 `__pycache__` 以外的所有文件（拒绝给你的主目录或 `/` 打检查点）。它**不会**撤销进程、服务、数据库、网络调用、`.git` 内部状态、被忽略的文件，以及工作区以外的任何东西。超过 256 MiB 或 20 000 个文件时只做变更检测。验证者会被告知它的检查点能恢复什么，基础设施结果会列出没有回滚的路径。
+> - 交互验证者降级为 `rollback`（会话启动时会提示）。在 git 仓库里，回滚恢复工作区根目录下被 git 跟踪、以及未跟踪且未被忽略的文件，但 `node_modules`、`.venv` 和 `__pycache__` 下未跟踪的文件除外；在 git 之外，恢复除 `.git`、`node_modules`、`.venv` 和 `__pycache__` 以外的所有文件（拒绝给你的主目录或 `/` 打检查点）。它**不会**撤销进程、服务、数据库、网络调用、`.git` 内部状态、被忽略的文件，以及工作区以外的任何东西。超过 256 MiB 或 20 000 个文件时只做变更检测。验证者会被告知它的检查点能恢复什么，基础设施结果会列出没有回滚的路径。
 > - 不加 `--allow-unconfined` 时谱系会拒绝启动。无约束的谱系请在一次性的容器或虚拟机里运行。
 > - 路径守卫和 Bash 扫描只是防止误操作和随手访问的启发式手段，不是安全边界。所有角色都以你的操作系统用户运行，通过混淆过的 shell 命令能读到你能读到的一切。
 >
@@ -347,14 +347,14 @@ cc-rsi explore abandon <id> [--reason TEXT]   # 仅限人工；记录结束方�
 守卫覆盖的内容（都是启发式的，见上面的警告）：
 
 - **cc-rsi 状态。** Claude 的文件工具不能访问 `~/.cc-rsi` 和外部 `memory.dir` 记忆库下的任何内容，只能读取记忆视图和转发脚本、使用打开中的学习草稿。它的 shell 命令也不能涉及这些路径：无论是直接写出、通过 `~`、`$HOME` 或相对路径、通过可能匹配到它们的通配符或花括号展开，还是通过起点在它们上层的递归遍历（`grep -r`、`rg`、`find`、`du`、`tree`、`ls -R`、`cp -r`、`rsync -a`、`tar` 等），包括写在 `sh -c` 和 `eval` 字符串里的命令。到达不了它们的遍历不会被拒绝：`rg`、`fd`、`ag`、`tree` 和 `ls -R` 在没有要求显示隐藏文件时会跳过 `~/.cc-rsi` 这样的点目录，`find -maxdepth`、`tree -L`、`rg --max-depth` 和 `fd -d` 在它们上方就停下。来不及检查完的超长命令会被拒绝；请拆开命令，或用 Write 工具写文件。转发脚本可以运行，但不能被改写。
-- **插件代码。** 正在运行的插件（插件目录以及 `CLAUDE_PLUGIN_ROOT`）是只读的：Claude 的 Edit 和 Write 工具在那里被拒绝（Read 和 Grep 仍然可用），shell 命令只能把它作为要运行的程序，例如 `node <插件目录>/bin/cc-rsi …`。角色子进程同样只能读取它（文件工具，以及沙箱的写入规则）。SessionStart 会给插件的 `lib`、`hooks`、`bin`、`mcp` 和 `prompts` 计算指纹；此后代码一旦变化，`submit` 和验证作业都会以基础设施结果 `plugin_changed` 拒绝，谱系也会在下一个角色子进程启动前暂停（`plugin_changed`）。如果会话的项目就是插件所运行的那份 cc-rsi 检出（或位于其中，即用 cc-rsi 开发 cc-rsi），这些规则不生效；安装在 Claude 配置目录下的插件始终受保护。
+- **插件代码。** 正在运行的插件（插件目录以及 `CLAUDE_PLUGIN_ROOT`）是只读的：Claude 的 Edit 和 Write 工具在那里被拒绝（Read 和 Grep 仍然可用），shell 命令只能把它作为要运行的程序，例如 `node <插件目录>/bin/cc-rsi …`。角色子进程同样只能读取它（文件工具，以及沙箱的写入规则）。SessionStart 会给插件的 `lib`、`hooks`、`bin`、`mcp` 和 `prompts` 计算指纹，MCP 服务器启动时也会给它加载的代码计算同样的指纹；此后代码一旦变化，`submit` 和验证作业都会以基础设施结果 `plugin_changed` 拒绝，谱系也会在下一个角色子进程启动前暂停（`plugin_changed`）。`/clear` 不会接受改动：MCP 服务器仍在运行，仍然与它加载的代码比对，只有重启 Claude Code 才会接受。如果会话的项目就是插件所运行的那份 cc-rsi 检出（或位于其中，即用 cc-rsi 开发 cc-rsi），这些规则不生效；安装在 Claude 配置目录下的插件始终受保护。
 - **验证者对话记录。** 会话启动过验证者之后，它检查过的每个候选根目录对应的 Claude Code 对话记录目录（`~/.claude/projects/<slug>/`，以及 `CLAUDE_CONFIG_DIR` 下的同名目录）都不允许 Claude 的文件工具和 shell 命令访问，Claude Code 的自动记忆（`<slug>/memory`，也包括 `~/.claude/projects/*/memory/MEMORY.md` 这样的通配符）和本会话自己的记录文件除外；跨 `~/.claude/projects` 的搜索也会被拒绝，交给递归遍历或解释器的上层目录同样会被拒绝。只是提到配置目录本身的命令（`ls ~/.claude`、`cd ~/.claude`、把文件复制进去、提交说明）不会被拒绝。每次 `--resume` 之前，作业都会把对话记录与上一个作业记录的指纹比对；记录被改动过时，旧上下文退役，新上下文带着之前的报告重新开始。
-- **执行者的推理痕迹。** 所有角色子进程都不能访问 `~/.claude` 和 `$CLAUDE_CONFIG_DIR` 下的 `projects`、`.credentials.json`、`plans`、`todos`、`tasks`、`file-history` 和 `history.jsonl`，会话临时目录 `<TMPDIR>/claude-<uid>` 和 `/tmp/claude-<uid>`，cc-rsi 自己的状态（`projects`、`run`、`bin`、`config.json`、`logs`、其他谱系的工作树、交互验证者的临时目录），以及外部记忆库。`shell-snapshots` 和 `session-env` 仍然可读，因为角色自己的 Bash 要加载它们；角色自己的临时目录（`TMPDIR`，即其临时目录下的 `.tmp`）和它自己的 Claude Code 会话目录（大型工具结果保存在那里）也可读。
+- **执行者的推理痕迹。** 所有角色子进程都不能访问 `~/.claude` 和 `$CLAUDE_CONFIG_DIR` 下的 `projects`、`.credentials.json`、`plans`、`todos`、`tasks`、`file-history` 和 `history.jsonl`，会话临时目录 `<TMPDIR>/claude-<uid>` 和 `/tmp/claude-<uid>`，cc-rsi 自己的状态（`projects`、`run`、`bin`、`config.json`、`logs`、其他谱系的工作树、交互验证者的临时目录），以及外部记忆库。`shell-snapshots` 和 `session-env` 仍然可读，因为角色自己的 Bash 要加载它们；角色自己的临时目录（`TMPDIR`，即其临时目录下的 `.tmp`）和它自己的 Claude Code 会话目录（大型工具结果保存在那里）也可读：包含它的隐藏目录在权限规则和沙箱里绕开它逐项拒绝（另外拒绝其下所有对话记录 `*.jsonl`），所以 Read 和 Bash 都能读到角色自己的工具结果。
 
 在任何模式下都成立的其他限制：
 
 - 有沙箱时，沙箱也只包裹 Bash；钩子、Claude Code 本身和文件工具由权限规则和角色守卫约束。
-- 规范记忆、验证者报告、验证者对话记录和插件代码做的是**篡改检测**，而不是防篡改：每个敏感步骤之前都会把记忆树哈希和最后一次提交比对，报告在读取时会重新计算哈希，对话记录在 `--resume` 之前比对指纹，插件代码在会话启动时记录指纹。
+- 规范记忆、验证者报告、验证者对话记录和插件代码做的是**篡改检测**，而不是防篡改：每个敏感步骤之前都会把记忆树哈希和最后一次提交比对，报告在读取时会重新计算哈希，对话记录在 `--resume` 之前比对指纹，插件代码在会话启动时和 MCP 服务器启动时记录指纹。
 - 没有操作系统沙箱时，角色的 Bash（谱系子进程，或回滚模式下的交互验证者）仍然可以改写插件代码。这种改动会在下一个谱系角色子进程启动前被发现（谱系暂停）；对交互验证来说，则在下一次 `submit` 和作业启动时被发现。
 - 角色的对话记录和普通会话一样存放在 `~/.claude/projects/`。交互验证者的会话和你的项目共用同一个记录目录，可能出现在会话选择器里；只有守卫在阻止 Claude 访问它们。
 
@@ -374,7 +374,7 @@ cc-rsi gc [--older-than DAYS] [--dry-run] [--streams] [--project <dir> [--sessio
 cc-rsi version | help
 ```
 
-带 `*` 的是仅限人工的命令：在 Claude Code 内运行会被拒绝（退出码 65），并打印 `in a terminal, run: <命令>`；Claude 的 Bash 也不能执行它们（守卫会解析命令，所以只是提到它们的提交说明、议题标题或路径不会被拒绝）。大多数命令接受 `--project <dir>`（默认是当前目录所在的项目）。退出码：0 成功，1 错误，2 用法错误，3 被阻碍项拒绝，64 在角色子进程内，65 仅限人工。`--report-exit` 写在命令词之后时，命令行工具会把 `[cc-rsi exit N]` 作为 stdout 的最后一行打印出来并以 0 退出（技能就是这样用的）；在角色子进程内仍然以 64 退出。`cc-rsi help` 打印完整用法，包括配置的优先级。
+带 `*` 的是仅限人工的命令：在 Claude Code 内运行会被拒绝（退出码 65），并打印 `in a terminal, run: <命令>`；Claude 的 Bash 也不能执行它们（守卫会解析命令，所以只是提到它们的提交说明、议题标题或路径不会被拒绝；同时清除 `CLAUDECODE` 的命令，比如带 `env -u CLAUDECODE`、`env -i`、`unset CLAUDECODE` 或 `CLAUDECODE=` 的命令，只要文本里出现 `cc-rsi` 后跟仅限人工的子命令就会被拒绝，因为解析出的命令词可能漏掉计算出来的命令词）。大多数命令接受 `--project <dir>`（默认是当前目录所在的项目）。退出码：0 成功，1 错误，2 用法错误，3 被阻碍项拒绝，64 在角色子进程内，65 仅限人工。`--report-exit` 写在命令词之后时，命令行工具会把 `[cc-rsi exit N]` 作为 stdout 的最后一行打印出来并以 0 退出（技能就是这样用的）；在角色子进程内仍然以 64 退出。`cc-rsi help` 打印完整用法，包括配置的优先级。
 
 - `memory verify` 把规范记忆和最后一次提交比对。如果它在提交之外被改过，`--accept-external` 把这次改动记为一次提交，`restore <N>` 回滚到第 `N` 个历史快照（见 `memory history`）。记忆处于冻结状态时，外部改动不能被接受；此时 `memory verify` 会指出能恢复冻结记忆树的那个 `restore <N>`。
 - `memory export <dir>` / `import <dir>` 把记忆导出到记忆库之外，或从外部导入（导入会记为一次提交）。
@@ -425,15 +425,15 @@ cc-rsi 把状态放在所有工作区之外，也不放在 Claude Code 的插件
 | `submit` 提示 "cannot attest this call" | 插件的钩子在这个会话里没有运行（`disableAllHooks`、`allowManagedHooksOnly`，或插件被禁用）。在该会话里运行 `/cc-rsi:doctor`，它会检查钩子有没有采集到你的请求。 |
 | 验证以 `INFRASTRUCTURE: … (auth)` 结束 | 角色子进程使用 `--restricted`，会忽略你的设置文件。cc-rsi 会从 `~/.claude/settings.json`（或 `$CLAUDE_CONFIG_DIR/settings.json`）转发 `apiKeyHelper`、`awsAuthRefresh`、`awsCredentialExport`、`forceLoginMethod`、`forceLoginOrgUUID` 和提供商相关的 `env` 条目，并从环境中传入 `ANTHROPIC_*`、`AWS_*`、`CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`、`CLAUDE_CODE_OAUTH_TOKEN`、代理和 CA 相关变量。其他变量可以通过 `children.envPassthrough` 添加。用 `cc-rsi doctor --live` 确认。 |
 | `INFRASTRUCTURE: … (config)` | 模型名被拒绝；检查 `verifier_model` / `models.*`。 |
-| `INFRASTRUCTURE: … (plugin_changed)` | 会话启动之后插件代码发生了变化（更新或改动）。重启 Claude Code：开新会话，或用 `--resume`/`--continue` 继续这个会话。重启后的会话接受它加载的代码，并在启动状态行里说明。编辑器的交换文件和 `.DS_Store` 不算代码。 |
-| `INFRASTRUCTURE: … (candidate_changed_during_inspection)`，或者某个 `PASS` 的 NOTE 说它不算当前有效 | 检查期间有检查以外的东西改动了工作区，通常是 `submit` 之前启动的后台进程。先停掉它，再让 Claude 重新提交。 |
+| `INFRASTRUCTURE: … (plugin_changed)` | 会话启动之后插件代码发生了变化（更新或改动）。重启 Claude Code：开新会话，或用 `--resume`/`--continue` 继续这个会话（`/clear` 不够：MCP 服务器保留着它加载的代码）。重启后的会话接受它加载的代码，并在启动状态行里说明。编辑器的交换文件和 `.DS_Store` 不算代码。 |
+| `INFRASTRUCTURE: … (candidate_changed_during_inspection)`，或者某个 `PASS` 的 NOTE 说它不算当前有效 | 检查期间有检查以外的东西改动了工作区，通常是 `submit` 之前启动的后台进程；在回滚模式下也可能是验证者自己的命令。先停掉这类进程，再让 Claude 重新提交。如果 NOTE 说同一批文件在同一个候选结果的上一次检查中也被改动过，先让它们稳定下来（提交重新生成的文件、忽略或删掉缓存、停掉写入者）。 |
 | Claude 的编辑被拦下："an independent verification of this workspace is running" | 作业运行期间这是正常的。Claude 应该调用 `wait_verdict`；你也可以用 `cc-rsi verify cancel` 取消。如果提示说某个作业 "ended without restoring its checkpoint"，说明它的恢复正在进行：稍后重试即可（`cc-rsi doctor` 会显示为等待恢复）。 |
 | "a verification failed to restore the workspace" | 工作区锁被故意保留。先检查 `~/.cc-rsi/projects/<key>/sessions/<sid>/displaced/<job>/` 下被挪开的副本，再在终端运行 `cc-rsi doctor --release-lock <root>`（它也会删除恢复失败标记）。 |
 | `verify cancel` 提示作业 "is not cancelled" | cc-rsi 无法证明这个 pid 就是作业（启动标记不匹配、命令行不可读、心跳超过 90 秒），所以不发任何信号。请自行确认该 pid 并用 `kill` 停止，或者等下一次会话启动、`submit` 或 `status` 去恢复这个作业。 |
 | Claude Code 读取记忆视图时弹出权限确认 | 守卫会预先放行对视图和打开中草稿的读取，但这一点尚未在真实的 Claude Code 上验证。可以把 `Read(~/.cc-rsi/projects/*/views/**)`（学习时还有 `Edit(~/.cc-rsi/projects/*/drafts/**)`）加入权限允许规则。 |
 | 学习阶段已打开，但 Claude 丢了确认码（例如上下文压缩之后） | `learn` 会重新给出当前阶段的消息和确认码；`memory_commit` 带 `abandon: true` 可以不用确认码直接丢弃草稿。上下文压缩或恢复会话后，SessionStart 会提醒 Claude 有一个打开中的学习阶段。 |
 | `memory changed outside a commit` | `cc-rsi memory verify` 会显示差异。用 `cc-rsi memory verify --accept-external` 保留改动，或用 `cc-rsi memory restore <N>` 回滚。记忆处于冻结状态时只能用恢复，`memory verify` 会指出对应的快照。 |
-| 谱系处于 `paused_infra` | `cc-rsi explore status <id>` 会显示故障类别和细节。排除原因后运行 `cc-rsi explore resume <id>`。`context_lost` 表示某个执行者或课程智能体的对话记录已经不在了（例如被 Claude Code 的 `cleanupPeriodDays` 清理）；这个上下文无法继续，只能放弃该谱系。`plugin_changed` 表示谱系运行期间插件代码发生了变化；确认改动后加 `--accept-drift` 恢复。 |
+| 谱系处于 `paused_infra` | `cc-rsi explore status <id>` 会显示故障类别和细节。排除原因后运行 `cc-rsi explore resume <id>`。`context_lost` 表示某个执行者或课程智能体的对话记录已经不在了（例如被 Claude Code 的 `cleanupPeriodDays` 清理）；这个上下文无法继续，只能放弃该谱系。`plugin_changed` 表示谱系运行期间插件代码发生了变化；确认改动后加 `--accept-drift` 恢复。`candidate_capture_mismatch` 表示目标验证者评判过的那棵树的副本与它不一致，因此不计分；由较早的 cc-rsi 版本启动、项目根目录里有特殊文件（FIFO、套接字）的目标尝试，每次恢复都会在这里再次暂停，这样的谱系请放弃。 |
 | `resume refused: the plugin changed since the lineage started` | 谱系开始之后插件被更新了（或者它运行过的版本目录被清理了）。加 `--accept-drift` 用当前代码继续（会记录在 `lineage.json` 里，并刷新提示词快照；更新前已发送的消息即使在新模板下措辞不同，也会重放记录下的回复）。 |
 | `explore stop` 拒绝执行：引擎 "runs on host …" | 引擎租约写的是另一台主机，cc-rsi 无法证明这个 pid 就是这条谱系的引擎。在运行它的机器上用 `ps -p <pid> -o command=` 确认后在那里停止（如果就在本机，用 `kill <pid>`）。 |
 
@@ -461,18 +461,18 @@ claude --plugin-dir .                      # 在会话里试用当前工作树
 - 提示词黄金文件：有意修改提示词之后，运行 `CC_RSI_UPDATE_GOLDENS=1 node scripts/run-tests.mjs test/prompts/render.test.mjs`，再审阅差异。
 - `test/plugin/boundaries.test.mjs` 强制检查模块的导入边界；只有 `lib/runtime/child.mjs` 可以启动 `claude`。
 
-当前状态：`npm test` 运行 746 个测试，全部通过；`claude plugin validate . --strict` 通过。真实模型冒烟测试（`npm run smoke`，Claude Code 2.1.296，haiku）的五个默认场景全部通过（准备、`doctor --live`、经由插件的交互 `submit`、一条 broad 谱系、冻结加冻结谱系加封存评测）；“SIGTERM 后恢复”场景被跳过。详情见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#verify-early-outcomes)。
+当前状态：`npm test` 运行 775 个测试，全部通过；`claude plugin validate . --strict` 通过，没有警告。包含额外场景的真实模型冒烟测试（`CC_RSI_E2E_FULL=1 npm run smoke`，Claude Code 2.1.296，haiku）的六个场景全部通过：准备、`doctor --live`、经由插件的交互 `submit`、一条 broad 谱系、一条在波次中途被停止后又恢复的 broad 谱系，以及冻结加冻结谱系加封存评测。详情见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#verify-early-outcomes)。
 
 ## 已知限制
 
 以下问题在最近一次审查后仍然存在；对每一项，cc-rsi 只能发现或限制它，而不能阻止它。
 
-1. **后台进程不会被停止。** 工作区锁只暂停 Claude 新发起的编辑和命令，不影响 `submit` 之前启动的进程。它们造成的改动在检查结束后才被发现（沙箱：不产生判定；回滚：`PASS` 不算当前有效），而且它们仅新建的文件不计入。在回滚模式下，验证者自己的命令造成的改动看起来一样，也会让 `PASS` 不算当前有效。
+1. **后台进程不会被停止。** 工作区锁只暂停 Claude 新发起的编辑和命令，不影响 `submit` 之前启动的进程。它们造成的改动在检查结束后才被发现（沙箱：不产生判定；回滚：`PASS` 不算当前有效），而且它们仅新建的文件不计入。在回滚模式下，验证者自己的命令造成的改动看起来一样，也会让 `PASS` 不算当前有效（`node_modules`、`.venv` 和 `__pycache__` 下未跟踪的派生缓存除外）。
 2. **没有沙箱的角色可以通过 Bash 改写插件代码。** 没有操作系统沙箱时只有它们的文件工具被拒绝；改动会在下一个谱系角色子进程启动前以及下一次 `submit` 时被发现，但无法阻止。
-3. **守卫是启发式的。** 所有角色和你的会话共用一个操作系统用户；Bash 扫描能挡住误操作和随手访问，挡不住混淆过的命令。
+3. **守卫是启发式的。** 所有角色和你的会话共用一个操作系统用户；Bash 扫描能挡住误操作和随手访问，挡不住混淆过的命令。最近一次审查还有三项发现没有修复。被认为会跳过点目录的 `rg` 遍历，在带 `--hidden` 的 ripgrep 配置（`RIPGREP_CONFIG_PATH`）下或带 `-g`/`--iglob` 通配符时仍会进入它们；限制了深度的 `find` 没有考虑它的 `-exec` 或管道后的 `xargs` 发起的遍历；因此这类命令可以读到 `~/.cc-rsi` 和验证者对话记录。对话记录规则看不到通过 here-document 交给解释器的代码（`python3 - <<'EOF'`）、在同一条命令里创建并读取的指向对话记录目录的链接，也看不到对它的 `git diff --no-index`。here-document 文本中以仅限人工的 `cc-rsi` 命令开头的行仍会被当作命令解析，所以这样的提交（Claude Code 的提交说明模板、PR 正文、变更日志）会被拒绝。
 4. **只做变更检测的检查点不恢复任何东西。** 超过 `interactive.checkpointMaxBytes` / `checkpointMaxFiles` 时，验证者会被告知不会恢复任何东西，结果会列出发生变化的路径。
-5. **没有 `source` 的提示。** Claude Code 省略 UserPromptSubmit 的 `source` 字段时，只有与本会话中成功的 CronCreate、ScheduleWakeup 或 RemoteTrigger 调用的提示文本（去掉首尾空白后）完全一致、且该安排仍可能触发的提示，才会被认出是 Claude 自己安排的。在此期间你亲手输入同样的文本，也会被当作安排的提示。
-6. **尚未在真实环境中验证：** 异步唤醒空闲会话、记忆视图的权限预先放行（后备方案分别是 `wait_verdict` 和手动添加允许规则）、沙箱模式的运行、Node 18，以及用真实模型运行“SIGTERM 后恢复”场景。
+5. **没有 `source` 的提示。** Claude Code 省略 UserPromptSubmit 的 `source` 字段时，只有与本会话中成功的 CronCreate、ScheduleWakeup 或 RemoteTrigger 调用的提示文本（去掉首尾空白后）完全一致、且该安排仍可能触发的提示，才会被认出是 Claude 自己安排的。在此期间你亲手输入同样的文本，也会被当作安排的提示。还没有任何任务列表列出过的安排，在被删除或满 8 天之前都算仍可能触发。
+6. **尚未在真实环境中验证：** 异步唤醒空闲会话、记忆视图的权限预先放行（后备方案分别是 `wait_verdict` 和手动添加允许规则）、沙箱模式的运行和 Node 18。
 7. **规范文档滞后。** `docs/design/SPEC.md` 还没有随最近的修复更新；[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#recorded-deviations-from-the-specification) 列出了代码现在与它不同的地方。
 
 ## 与 RSIAgent 仍然存在的差异

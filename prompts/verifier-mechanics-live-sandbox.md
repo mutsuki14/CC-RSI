@@ -5,7 +5,7 @@ Your Bash commands run inside an OS sandbox: the candidate workspace and every p
 the harness checkpoints it before your inspection and restores any change afterwards, so an effect you cause is not candidate evidence.
 
 ## checkpoint-listed
-the harness checkpoints its files that git tracks or would add (outside a git repository: every file except those under node_modules, .venv and __pycache__ directories) before your inspection and restores any change to them afterwards; other files, such as those git ignores, are neither restored nor reported. An effect you cause is not candidate evidence.
+the harness checkpoints its files that git tracks or would add, except untracked files under node_modules, .venv and __pycache__ directories (outside a git repository: every file except those under such directories), before your inspection and restores any change to them afterwards; other files, such as those git ignores, are neither restored nor reported. An effect you cause is not candidate evidence.
 
 ## checkpoint-detect
 it is too large for the harness to checkpoint, so a change to it would not be restored. An effect you cause is not candidate evidence.

@@ -2,7 +2,8 @@
 // test/engine.test.ts `runDeepExploration` and `engine learning` to the fake claude.
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { readJsonl } from '../../lib/core/jsonl.mjs'
@@ -65,6 +66,98 @@ describe('deep lineage: the verified candidate (r2-engine-4)', () => {
     const paused = await run(e, dir)
     assert.equal(paused.status, 'paused_infra')
     assert.equal(paused.infra.cls, 'candidate_changed_before_capture')
+  })
+
+  it('a crash while the checkpoint is deleted never scores a partial tree (r3-engine-concurrency-1)', async () => {
+    const fsp = (await import('node:fs/promises')).default
+    const { syncBuiltinESMExports } = await import('node:module')
+    const e = await engineEnv(OPTS)
+    const { dir } = await create(e, { phase: 'deep', id: 'v', target: TARGET })
+    const checkpoint = join(e.layout('v').priv, 't001', 'checkpoints', 'g001')
+    const { rm } = fsp
+    // The engine dies inside the deletion of the terminal inspection's checkpoint: one child is
+    // gone, then the process stops (an error rm does not retry pauses the engine the same way).
+    let armed = true
+    fsp.rm = async (path, options) => {
+      if (armed && (String(path) === checkpoint || String(path).startsWith(`${checkpoint}.trash-`))) {
+        armed = false
+        await rm(join(String(path), readdirSync(String(path)).sort()[0]), { recursive: true, force: true })
+        throw Object.assign(new Error('injected crash while deleting the checkpoint'), { code: 'EIO' })
+      }
+      return rm(path, options)
+    }
+    syncBuiltinESMExports()
+    let first
+    try {
+      first = await run(e, dir)
+    } finally {
+      fsp.rm = rm
+      syncBuiltinESMExports()
+    }
+    assert.equal(armed, false, 'the checkpoint was being deleted')
+    assert.equal(first.status, 'paused_infra')
+    assert.equal(existsSync(checkpoint), false, 'the checkpoint is retired by a rename first: it is never left half-deleted')
+    assert.equal((await run(e, dir)).status, 'completed')
+    const result = readJson(join(dir, 'result.json'))
+    const j = await OpJournal.open(dir)
+    assert.equal(result.candidate_digest, j.result('t001/g1/pre').fp, 'the scored candidate is the inspected tree')
+    assert.ok(readdirSync(join(result.candidate_copy, 'tree')).includes('out.txt'))
+    assert.equal(result.candidate_changed_after_verdict, false)
+    assert.deepEqual(readdirSync(join(e.layout('v').priv, 't001', 'checkpoints')), [], 'no trash is left behind')
+  })
+
+  it('a recovering inspection keeps its complete capture, and never captures a partial checkpoint (r3-engine-concurrency-1)', async () => {
+    const ref = await engineEnv(OPTS)
+    const r0 = await create(ref, { phase: 'deep', id: 'v', target: TARGET })
+    await run(ref, r0.dir)
+    const S = (await readJsonl(join(r0.dir, 'ops.jsonl'))).find(r => r.key === 't001/g1/post' && r.status === 'done').seq
+    for (const captureLost of [false, true]) {
+      const e = await engineEnv(OPTS)
+      const { dir } = await create(e, { phase: 'deep', id: 'v', target: TARGET })
+      // The post op ran to its end (capture taken, checkpoint gone); the engine died before `done`.
+      assert.equal((await run(e, dir, { fault: { atSeq: S, mode: 'throw', when: 'before' } })).status, 'paused_infra')
+      const root = e.layout('v').projectRoot('t001')
+      const checkpoint = join(e.layout('v').priv, 't001', 'checkpoints', 'g001')
+      assert.equal(existsSync(checkpoint), false)
+      // A partial checkpoint as an older engine killed mid-delete left it.
+      cpSync(root, checkpoint, { recursive: true })
+      rmSync(join(checkpoint, 'out.txt'))
+      if (captureLost) rmSync(join(e.layout('v').priv, 't001', 'verified-candidate', 'manifest.json'))
+      const second = await run(e, dir)
+      if (captureLost) {
+        // Nothing complete is left to score: the lineage pauses (fail closed).
+        assert.equal(second.status, 'paused_infra')
+        assert.equal(second.infra.cls, 'candidate_capture_mismatch')
+        assert.equal(existsSync(join(dir, 'result.json')), false)
+        continue
+      }
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const result = readJson(join(dir, 'result.json'))
+      assert.equal(result.candidate_digest, (await OpJournal.open(dir)).result('t001/g1/pre').fp)
+      assert.ok(readdirSync(join(result.candidate_copy, 'tree')).includes('out.txt'))
+    }
+  })
+
+  it('captures a judged tree with special files, which no copy holds (r3-engine-concurrency-1)', async () => {
+    const ref = await engineEnv(OPTS)
+    const r0 = await create(ref, { phase: 'deep', id: 'v', target: TARGET })
+    await run(ref, r0.dir)
+    const S = (await readJsonl(join(r0.dir, 'ops.jsonl'))).find(r => r.key === 't001/g1/pre' && r.status === 'start').seq
+    const e = await engineEnv(OPTS)
+    const { dir } = await create(e, { phase: 'deep', id: 'v', target: TARGET })
+    assert.equal((await run(e, dir, { fault: { atSeq: S, mode: 'throw', when: 'before' } })).status, 'paused_infra')
+    const root = e.layout('v').projectRoot('t001')
+    execFileSync('mkfifo', [join(root, 'pipe')])
+    const second = await run(e, dir)
+    assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+    const j = await OpJournal.open(dir)
+    const pre = j.result('t001/g1/pre')
+    assert.match(String(pre.checkpointFp), /^[0-9a-f]{64}$/)
+    assert.notEqual(pre.checkpointFp, pre.fp)
+    assert.equal(j.result('t001/verified-candidate').digest, pre.checkpointFp)
+    const result = readJson(join(dir, 'result.json'))
+    assert.ok(readdirSync(join(result.candidate_copy, 'tree')).includes('out.txt'))
+    assert.equal(result.candidate_changed_after_verdict, false)
   })
 })
 

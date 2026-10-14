@@ -4,10 +4,12 @@
 // stdout carries JSON-RPC only; under CC_RSI_ROLE every tool is an isError result; cancellation.
 
 import assert from 'node:assert/strict'
-import { cpSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, cpSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { McpClient, ROOT, cleanEnv } from '../interactive/harness.mjs'
+import { McpClient, ROOT, callTool, cleanEnv, jobsOf, payloads, reapJobs, setupProject } from '../interactive/harness.mjs'
+import { runNode } from '../_helpers/spawn.mjs'
 import { tmpDir, tmpHome } from '../_helpers/tmp.mjs'
 
 async function server(extraEnv = {}) {
@@ -66,6 +68,31 @@ describe('MCP protocol over stdio', () => {
       assert.equal(r.result.serverInfo.version, '9.8.7')
     } finally {
       await client.close()
+    }
+  })
+
+  it('submit compares the disk with the code this server process loaded, so /clear never accepts an edit (r3-interactive-8)', async () => {
+    const root = await tmpDir('cc-rsi-plugin-')
+    for (const part of ['lib', 'hooks', 'bin', 'mcp', 'prompts', 'package.json', '.claude-plugin']) cpSync(join(ROOT, part), join(root, part), { recursive: true })
+    const p = await setupProject({ script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'Fine.\nVERDICT: PASS' } } } })
+    const hookOfCopy = (sub, payload) => runNode(join(root, 'hooks', 'hook.mjs'), [sub], { stdin: JSON.stringify(payload), env: p.env, timeoutMs: 20000 })
+    assert.equal((await hookOfCopy('session-start', payloads.sessionStart(p))).code, 0)
+    const client = new McpClient(p.env, { cwd: p.repo, server: join(root, 'mcp', 'server.mjs') })
+    try {
+      await client.initialize()
+      // The plugin checkout is edited in place after the server started (a git pull), then the user
+      // types /clear: a new session id in the same process, whose SessionStart records the disk.
+      appendFileSync(join(root, 'lib', 'interactive', 'verify-job.mjs'), '\n// edited after the MCP server started\n')
+      const cleared = { ...p, sid: randomUUID() }
+      assert.equal((await hookOfCopy('session-start', payloads.sessionStart(cleared, 'clear'))).code, 0)
+      assert.equal((await hookOfCopy('prompt', payloads.prompt(cleared, 'Rename the file'))).code, 0)
+      const r = await callTool(cleared, client, 'submit', {})
+      assert.equal(r.isError, true, r.text)
+      assert.match(r.text, /\(plugin_changed\)/)
+      assert.deepEqual(jobsOf(cleared), [], 'no verification job ran the changed code')
+    } finally {
+      await client.close()
+      await reapJobs(p.home)
     }
   })
 
