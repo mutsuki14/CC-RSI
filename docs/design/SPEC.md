@@ -2,6 +2,8 @@
 
 Status: final synthesis of the three design proposals and the two judges' verdicts. This document is normative: parallel implementers code against it without coordinating. Where it says MUST, tests assert it.
 
+> Note: this is the original design specification the implementation was built from. Behaviour changed by the review rounds that followed (request capture, transcript protection, lock fencing, practice replay at the Actor's root, plugin-code fingerprinting, and more) is recorded in [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#behaviour-of-the-latest-review-round-not-yet-in-the-specification). Where the two disagree, the code and `docs/ARCHITECTURE.md` describe the shipped behaviour.
+
 - Target: Claude Code 2.1.296 (the plugin runs on ≥ 2.1.295, because `onFailure` is required); Node ≥ 18; macOS, Linux and WSL2 (POSIX only).
 - Zero runtime npm dependencies. Tests use `node:test` only.
 - Plugin name `cc-rsi`. The repo root is both the plugin root and a single-plugin marketplace.

@@ -164,7 +164,9 @@ describe('main-session guard', () => {
     // A bare `node -e 0` spawn measured interleaved with the hooks is the machine's own floor. On an
     // idle machine the SPEC budget is asserted as is (p95 < 150 ms); on a loaded machine (a parallel
     // test run) single scheduling outliers dominate a p95, so the test asserts what the hook adds to
-    // node's own start-up instead (median over the baseline median).
+    // node's own start-up instead (median over the baseline median). Load slows both by the same
+    // factor, so that overhead is bounded relative to the floor: under 100 ms or 4 node start-ups
+    // (idle, the guard adds about 2 start-ups; a hook twice as slow adds about 5).
     const timed = async fn => {
       const t0 = process.hrtime.bigint()
       await fn()
@@ -181,7 +183,7 @@ describe('main-session guard', () => {
     for (const sub of ['guard', 'attest']) {
       const detail = `${sub}: p95 ${at(samples[sub], 0.95).toFixed(1)} ms, median ${at(samples[sub], 0.5).toFixed(1)} ms; node -e 0 median ${at(samples.node, 0.5).toFixed(1)} ms`
       if (idle) assert.ok(at(samples[sub], 0.95) < 150, detail)
-      else assert.ok(at(samples[sub], 0.5) - at(samples.node, 0.5) < 100, detail)
+      else assert.ok(at(samples[sub], 0.5) - at(samples.node, 0.5) < Math.max(100, 4 * at(samples.node, 0.5)), detail)
     }
   })
 })
