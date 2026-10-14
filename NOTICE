@@ -1,0 +1,58 @@
+cc-rsi
+Copyright 2026 cc-rsi contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+RSIAgent
+--------
+This product adapts the role prompts, transport tokens, memory hashing and
+memory-commit pipeline, and the Phase 1 / Phase 2 / Phase 3 lineage protocol
+of RSIAgent (https://github.com/AetherLabsAI/RSIAgent), Copyright 2026
+RSIAgent contributors, licensed under the Apache License, Version 2.0:
+
+  Sibo Zhu, Shicheng Fan, Xinyue Wang, Wenyi Wu, Kun Zhou, Biwei Huang.
+  "RSIAgent: Autonomous Exploration for Recursive Self-improvement in New
+  Environments." arXiv:2609.15364, 2026.
+
+dsh-rsi
+-------
+This product is also a port of dsh-rsi (https://github.com/mutsuki14/dsh-rsi),
+Copyright 2026 dsh-rsi contributors, licensed under the Apache License,
+Version 2.0, which adapted the same RSIAgent mechanisms for DeepSeek Harness.
+The RSIAgent texts reach cc-rsi in the form dsh-rsi neutralised them for a
+tool-using coding harness.
+
+Adapted files
+-------------
+  prompts/*.md, lib/prompts/roles.mjs, lib/prompts/guidance.mjs
+      Role system texts, charters, continuations, learning stages, Curriculum
+      and Verifier contracts and interactive guidance: RSIAgent core/actor.py,
+      core/verifier.py, core/loop.py, explore/charter.py,
+      explore/practice_loop.py, explore/target_learning.py, via dsh-rsi
+      src/roles/{actor,verifier,curriculum,epistemic}.ts and src/index.ts.
+  lib/protocol/tokens.mjs, lib/protocol/wave.mjs, lib/protocol/leads.mjs
+      dsh-rsi src/protocol/{tokens,wave}.ts and the lead parsing of
+      src/engine/steps.ts; RSIAgent explore/phase1_wave.py and core/checks.py.
+  lib/memory/hash.mjs, lib/memory/tree.mjs
+      Byte-compatible with RSIAgent explore/memory_hash.py tree_sha256.
+  lib/memory/store.mjs, lib/memory/audit.mjs, lib/memory/safe-path.mjs,
+  lib/memory/inventory.mjs, lib/memory/errors.mjs, lib/core/lock.mjs
+      dsh-rsi src/memory/{store,audit,paths}.ts (store, shingle tripwire, safe
+      paths, lease lock); RSIAgent explore/commit.py.
+  lib/workspace/git.mjs, lib/workspace/checkpoint.mjs,
+  lib/workspace/fixtures.mjs, lib/workspace/fingerprint.mjs,
+  lib/workspace/copy.mjs
+      dsh-rsi src/host/{git,checkpoint}.ts and src/engine/{fixtures,workspace}.ts.
+  lib/guard/paths.mjs
+      dsh-rsi src/host/isolation.ts.
+  lib/runtime/converse.mjs
+      dsh-rsi src/engine/converse.ts; RSIAgent core/loop.py liveness rules.
+  lib/engine/*.mjs
+      dsh-rsi src/engine/{lineage,steps}.ts state machines; RSIAgent
+      explore/phase1_wave.py, explore/practice_loop.py,
+      explore/target_learning.py (waves, unscored branch restart, deep
+      target/practice loop, run_with_resume, learning promotion).
+  lib/sealed/eval.mjs
+      dsh-rsi src/host/sealed.ts and the RSIAgent core/grading.py lifecycle.
+
+No RSIAgent benchmark, VM, model client or evaluator code is included.
