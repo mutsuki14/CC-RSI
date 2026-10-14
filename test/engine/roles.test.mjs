@@ -40,11 +40,75 @@ async function world() {
   return { home, W, otherLineage, otherProject, env, common }
 }
 
+/** The Bash verdict of a role policy for `command` (the role guard's scanBash call). */
+function bashOf(spec, command) {
+  const p = buildPolicy(spec)
+  return scanBash(command, { hidden: p.hidden, hiddenTokens: p.hiddenTokens, allowedPaths: p.allowedPaths, home: p.home, userHome: p.userHome, cwd: p.cwd, recursionGuard: true, bashDeny: p.bashDeny })
+}
+
 function assertOwnDirsVisible(spec) {
   for (const own of [spec.cwd, ...spec.addDirs]) {
     for (const hidden of spec.hidden) assert.ok(!isUnderLexical(own, hidden), `${own} is under hidden ${hidden}`)
   }
 }
+
+describe('lineage role specs: own temp files and tool results (r2-engine-5, r2-interactive-5)', () => {
+  it('a role reads its own Claude Code temp files under its TMPDIR from Bash; the user\'s stay hidden', async () => {
+    const w = await world()
+    const env = { ...w.env, TMPDIR: '/tmp' }
+    const uid = process.getuid?.() ?? 0
+    const root = join(w.W, 'projects', 'w001-a')
+    const actor = await specFor({ ...w.common, env, role: 'actor', kind: 'practice', phase: 'work', root, memoryDir: join(w.W, 'actor-private', 'w001-a', 'memory'), isolation: { mode: 'unconfined' } })
+    const scratch = join(w.W, 'verify-scratch', 'w001-a-v1')
+    const verifier = await specFor({ ...w.common, env, role: 'verifier', kind: 'practice', root, scratch, isolation: { mode: 'unconfined' } })
+    for (const spec of [actor, verifier]) {
+      const own = join(spec.extraEnv.TMPDIR, `claude-${uid}`, '-slug', 'session-1', 'scratchpad', 'probe.py')
+      for (const command of [`tail -n 40 ${own}`, `python3 ${own}`, `grep FAIL ${own}`, `ls ${spec.extraEnv.TMPDIR}`]) assert.equal(bashOf(spec, command), null, `${spec.role}: ${command}`)
+      assert.match(bashOf(spec, `cat /tmp/claude-${uid}/-other/session/tasks/x.output`) ?? '', /harness-private path/, spec.role)
+      assert.match(bashOf(spec, `cat ${spec.extraEnv.TMPDIR}/../../../../../../tmp/claude-${uid}/x`) ?? '', /harness-private path/, `${spec.role}: climbing out of its own dir`)
+    }
+  })
+
+  it('a role reads its own persisted tool results; another session\'s stay hidden', async () => {
+    const { ownSessionDirs } = await import('../../lib/runtime/private.mjs')
+    const w = await world()
+    const env = { ...w.env, HOME: w.home, CLAUDE_CONFIG_DIR: join(w.home, 'cfg') }
+    const root = join(w.W, 'projects', 'w001-a')
+    const base = await specFor({ ...w.common, env, role: 'verifier', kind: 'practice', root, scratch: join(w.W, 'verify-scratch', 'w001-a-v1'), isolation: { mode: 'unconfined' } })
+    const sid = '0f1e2d3c-0000-4000-8000-00000000abcd'
+    const spec = { ...base, ownPaths: ownSessionDirs({ cwd: root, sessionId: sid, env }) }
+    const mine = join(w.home, 'cfg', 'projects', root.replace(/[^a-zA-Z0-9]/g, '-'), sid, 'tool-results', 'b1.txt')
+    assert.ok(spec.ownPaths.some(d => mine.startsWith(`${d}/`)), JSON.stringify(spec.ownPaths))
+    assert.equal(bashOf(spec, `tail -50 ${mine}`), null)
+    const other = mine.replace(sid, '99999999-0000-4000-8000-000000000000')
+    assert.match(bashOf(spec, `tail -50 ${other}`) ?? '', /harness-private path/)
+    assert.match(bashOf(spec, `cat ${mine.replace('tool-results/b1.txt', '../x.jsonl')}`) ?? '', /harness-private path/)
+    // The role guard's file-tool check (Read) reads the same policy.
+    const p = buildPolicy(spec)
+    assert.ok(p.allowedPaths.some(d => mine.startsWith(`${d}/`)) && p.readRoots.some(d => mine.startsWith(`${d}/`)))
+    assert.ok(p.hidden.some(h => mine.startsWith(`${h}/`)), 'the projects root itself stays hidden')
+  })
+})
+
+describe('lineage role specs: sibling roots that are moved aside (r2-engine-6)', () => {
+  it('a sibling spawned while an Actor root is moved aside for an inspection still hides it', async () => {
+    const { rmSync } = await import('node:fs')
+    const w = await world()
+    const a = join(w.W, 'projects', 'w001-a')
+    // The inspection of w001-a moved its root aside; the replay has not recreated it yet.
+    rmSync(a, { recursive: true, force: true })
+    const root = join(w.W, 'projects', 'w001-b')
+    const actor = await specFor({ ...w.common, role: 'actor', kind: 'practice', phase: 'work', root, memoryDir: join(w.W, 'actor-private', 'w001-b', 'memory'), isolation: { mode: 'unconfined' } })
+    const verifier = await specFor({ ...w.common, role: 'verifier', kind: 'practice', root, scratch: join(w.W, 'verify-scratch', 'w001-b-v1'), isolation: { mode: 'unconfined' } })
+    for (const spec of [actor, verifier]) {
+      assert.ok(spec.hidden.includes(a), `${spec.role} hides the absent sibling root`)
+      assert.ok(spec.hidden.includes(`${a}.tmp`))
+      assert.ok(!spec.hidden.includes(root), `${spec.role} never hides its own root`)
+      assert.match(bashOf(spec, `cat ${a}/out.txt`) ?? '', /harness-private path/, spec.role)
+      assert.match(bashOf(spec, 'cat ../w001-a/out.txt') ?? '', /harness-private path/, spec.role)
+    }
+  })
+})
 
 describe('lineage role specs', () => {
   it('Actor work phase: memory read-only, siblings and harness dirs hidden, lossless practice', async () => {
@@ -62,8 +126,8 @@ describe('lineage role specs', () => {
     assert.deepEqual(spec.readRoots, [root, memoryDir, scratch])
     assert.deepEqual(spec.writeRoots, [root, scratch])
     assert.deepEqual(spec.readOnlyRoots, [memoryDir, ...CODE])
-    assert.equal(spec.extraEnv.TMPDIR, join(scratch, 'tmp'))
-    assert.ok(existsSync(join(scratch, 'tmp')) && (statSync(scratch).mode & 0o777) === 0o700, 'created private before the spawn')
+    assert.equal(spec.extraEnv.TMPDIR, join(scratch, '.tmp'))
+    assert.ok(existsSync(join(scratch, '.tmp')) && (statSync(scratch).mode & 0o777) === 0o700, 'created private before the spawn')
     // The user's Claude Code session temp dirs and reasoning artifacts are hidden (security-9).
     const uid = process.getuid()
     assert.ok(spec.hidden.includes(join('/tmp', `claude-${uid}`)))
@@ -122,7 +186,7 @@ describe('lineage role specs', () => {
     assert.deepEqual(practice.writeRoots, [])
     assert.deepEqual(practice.readOnlyRoots, [candidate, original, ...CODE])
     assert.equal(practice.extraEnv.VERIFIER_SCRATCH, scratch)
-    assert.equal(practice.extraEnv.TMPDIR, join(scratch, 'tmp'))
+    assert.equal(practice.extraEnv.TMPDIR, join(scratch, '.tmp'))
     assert.ok(practice.bashDeny.length > 0)
     for (const hidden of [join(w.W, 'actor-private'), join(w.W, 'curriculum-private'), join(w.W, 'projects', 'w001-a'), join(w.W, 'projects', 'w001-b'),
       join(w.W, 'verify', 'w001-b'), join(w.W, 'verify-scratch', 'w001-b-v1'), join(w.home, 'vscratch')]) {

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { commandWords, coversHiddenReason, hiddenReason, MUTATION_BASH_DENY, scanBash } from '../../lib/guard/bash.mjs'
+import { commandWords, coversHiddenReason, hiddenReason, MUTATION_BASH_DENY, scanBash, TOO_LARGE } from '../../lib/guard/bash.mjs'
 import { canonicalRoot, isFileTool, isUnder, physicalPath, searchCoversHidden, toolPathArgs } from '../../lib/guard/paths.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 
@@ -109,6 +109,27 @@ test('scanBash: globs and brace lists are expanded against hidden roots (securit
   assert.equal(scanBash(`du -sh ${userHome}*`, opts()), hiddenReason(home))
 })
 
+test('scanBash: here-documents are cut out by lines, and the path pass has a time budget (r2-overblock-8)', async () => {
+  const { userHome, home, proj, opts } = await homeLayout()
+  const body = Array.from({ length: 3000 }, (_, i) => `export const f${i} = (a, b) => a.map(v => v * ${i}).concat(b ?? []) // src/lib/f${i}.mjs`).join('\n')
+  const t0 = Date.now()
+  assert.equal(scanBash(`cat > src/job.mjs <<'EOF'\n${body}\nEOF`, opts()), null)
+  assert.ok(Date.now() - t0 < 3000, `a 3000-line heredoc took ${Date.now() - t0} ms`)
+  // Quoted here-document text is data: its bare words are not resolved (path-like words still are).
+  assert.equal(scanBash("cd .. && cat > notes <<'EOF'\n.cc-rsi\nEOF", opts()), null)
+  assert.equal(scanBash("cd .. && cat > notes <<'EOF'\n.cc-rsi/config.json\nEOF", opts()), hiddenReason(home))
+  assert.equal(scanBash(`cat > notes <<-"EOF"\n\t${home}/config.json\n\tEOF`, opts()), hiddenReason(home))
+  // An unquoted here-document runs its command substitutions.
+  assert.equal(scanBash('cat <<EOF\n$(cat ../.cc-rsi/config.json)\nEOF', opts()), hiddenReason(home))
+  // Text after the delimiter line is a command again, whatever quotes the body held.
+  assert.equal(scanBash("cat <<'EOF' > x\nit's \"quoted\nEOF\ncat ../.cc-rsi/config.json", opts()), hiddenReason(home))
+  assert.equal(scanBash("cat <<EOF # note\nit's\nEOF\ncd .. && ls .cc-rsi", opts()), hiddenReason(home))
+  // Out of time: refused (fail closed), never left to the hook timeout.
+  assert.equal(scanBash('cat a/b c/d', opts(proj, { budgetMs: -1 })), TOO_LARGE)
+  assert.equal(scanBash('cat a/b c/d', opts(proj)), null)
+  assert.ok(userHome)
+})
+
 test('scanBash: commands that walk directory trees may not start above a hidden root (security-6)', async () => {
   const { userHome, home, proj, opts } = await homeLayout()
   const denied = [
@@ -117,7 +138,8 @@ test('scanBash: commands that walk directory trees may not start above a hidden 
     [proj, 'find ~ -name task.json'],
     [proj, 'find -L ~ -name task.json'],
     [proj, 'cd .. && grep -r VERDICT .'],
-    [proj, 'ls -R ~'],
+    [proj, 'ls -aR ~'],
+    [proj, 'ls -R --almost-all ~'],
     [proj, 'grep -r --include=*.json VERDICT ..'],
     [proj, 'grep -d recurse VERDICT ~'],
     [proj, 'rsync -a ~/ /tmp/backup'],
@@ -129,35 +151,59 @@ test('scanBash: commands that walk directory trees may not start above a hidden 
     [proj, 'tar czf /tmp/x.tgz -C ~ .'],
     [proj, 'diff -r ~ /tmp/y'],
     [proj, 'du -sh ~'],
-    [proj, 'tree ~'],
-    [proj, 'fd task ~'],
+    [proj, 'tree -a ~'],
+    [proj, 'tree -a -L 2 ~'],
+    [proj, 'fd -H task ~'],
+    [proj, 'fd --unrestricted task ~'],
+    [proj, 'rg --hidden VERDICT ~'],
+    [proj, 'rg -uu VERDICT ~'],
+    [proj, 'rg -. VERDICT ~'],
+    [proj, 'ag --hidden VERDICT ~'],
+    [proj, 'find ~ -maxdepth 2 -name task.json'],
     [proj, 'find / -name x 2>/dev/null'],
     [proj, 'grep -r x $PWD/..'],
-    [proj, 'cd ~ && rg VERDICT'],
+    [proj, 'cd ~ && rg --hidden VERDICT'],
     [proj, 'bash -c "grep -r x ~"'],
     [proj, 'eval "find ~ -name x"'],
     [proj, 'grep -r x uhlink'],
-    [proj, `ls -R ${userHome.slice(0, -1)}*`],
+    [proj, `ls -aR ${userHome.slice(0, -1)}*`],
     // Started in the user home: the cwd itself is walked.
     [userHome, 'grep -r foo .'],
     [userHome, 'grep -r -e VERDICT'],
     [userHome, 'grep -rn VERDICT 2>/dev/null'],
-    [userHome, 'rg VERDICT'],
+    [userHome, 'rg -uu VERDICT'],
     [userHome, 'find -name task.json'],
+    [userHome, 'find . -maxdepth 2 -name "*.json"'],
     [userHome, 'du -sh 2>/dev/null'],
-    [userHome, 'ls -R'],
+    [userHome, 'ls -AR'],
+    // A here-document with a quoted delimiter is cut out by lines: an apostrophe in it does not hide
+    // the command after its delimiter line.
+    [proj, "cat > notes.txt <<'EOF'\ndon't\nEOF\ngrep -r x .."],
   ]
   for (const [cwd, command] of denied) assert.equal(scanBash(command, opts(cwd)), hiddenReason(home), `${command} (cwd ${cwd === proj ? 'project' : 'home'})`)
   const allowed = ['grep -r foo src', 'grep -rn "TODO" . --include=*.py', 'find . -name x', 'find src -name "*.py" -exec grep -l x {} +', 'ls -la ..', 'ls ~', 'cp -r src ~',
     'cp ~/.bashrc .', 'grep foo ~/notes.txt', 'rm -rf build', 'rsync -av src/ /tmp/dst/', 'tar czf /tmp/p.tgz -C ~ proj', 'rg x src 2>&1 | head', 'git grep -n x',
     'du -sh .', 'ls -R src', 'find . -type f -name "*.log" -delete', 'grep -r . src', 'rm -rf ./* ./.[!.]* 2>/dev/null; true']
   for (const command of allowed) assert.equal(scanBash(command, opts()), null, command)
+  // rg, fd, ag, tree and `ls -R` do not enter dot directories without their show-hidden options, and
+  // `find -maxdepth 1` from ~ lists only the name `.cc-rsi` (r2-overblock-6).
+  for (const [cwd, command] of [[userHome, 'rg -l TODO'], [userHome, 'rg -u TODO'], [userHome, 'fd -e md'], [userHome, 'tree -L 1'], [userHome, 'ls -R'],
+    [userHome, 'find . -maxdepth 1 -name "*.txt"'], [proj, 'find .. -maxdepth 1 -type d -name "*proj*"'], [proj, 'rg -l draft ..'], [proj, 'tree ~'],
+    [proj, 'fd task ~'], [proj, 'ls -R ~'], [proj, 'cd ~ && rg VERDICT'], [proj, 'ag TODO ~'], [proj, 'find ~ -maxdepth 0 -type d'],
+    [proj, `ls -R ${userHome.slice(0, -1)}*`]]) {
+    assert.equal(scanBash(command, opts(cwd)), null, `${command} (cwd ${cwd === proj ? 'project' : 'home'})`)
+  }
+  // A hidden root below non-dot segments is still reached by them.
+  const store = join(userHome, 'store')
+  mkdirSync(store)
+  for (const command of ['rg TODO ~', 'fd x ~', 'tree ~', 'ls -R ~', 'find ~ -maxdepth 2 -name x']) {
+    assert.equal(scanBash(command, opts(proj, { hidden: [store] })), hiddenReason(store), command)
+  }
+  assert.equal(scanBash('find ~ -maxdepth 1 -name x', opts(proj, { hidden: [store] })), null, 'depth 1 lists only the name store')
   // The caller chooses the reason (the role guard uses the Grep/Glob search-root reason).
   assert.equal(scanBash('grep -rn VERDICT ~', opts(proj, { coversReason: path => coversHiddenReason(path) })), coversHiddenReason(userHome))
   assert.match(coversHiddenReason('/x'), /^\/x contains a harness-private path hidden from this role; narrow the search path/)
   // A store root without a leading dot is reached by `*` too.
-  const store = join(userHome, 'store')
-  mkdirSync(store)
   assert.equal(scanBash('du -sh ~/*', opts(proj, { hidden: [store] })), hiddenReason(store))
   assert.equal(scanBash('ls ~/*', opts(proj, { hidden: [store] })), hiddenReason(store), 'ls of a dir lists the hidden root itself')
   assert.equal(scanBash('ls ~/p*', opts(proj, { hidden: [store] })), null)

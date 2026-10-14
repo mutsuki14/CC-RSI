@@ -2,9 +2,10 @@
 // test/engine.test.ts `runDeepExploration` and `engine learning` to the fake claude.
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
+import { readJsonl } from '../../lib/core/jsonl.mjs'
 import { OpJournal } from '../../lib/engine/journal.mjs'
 import { admitResume, applyResume } from '../../lib/engine/records.mjs'
 import { treeFingerprint } from '../../lib/workspace/fingerprint.mjs'
@@ -24,6 +25,48 @@ const stage = prompt => (prompt.includes('FINAL MEMORY DISTILLATION') ? 'distill
     : prompt.includes('FREE-FORM LEARNING DIAGNOSIS') ? 'diagnosis'
       : prompt.includes('MEMORY LIMITS') ? 'limits'
         : prompt.includes('MEMORY CONFLICT') ? 'conflict' : 'work')
+
+describe('deep lineage: the verified candidate (r2-engine-4)', () => {
+  const OPTS = { config: { exploration: { stopPolicy: 'verifier_pass' } } }
+
+  it('is the inspected tree even when the root changes between the verdict and its capture', async () => {
+    const ref = await engineEnv(OPTS)
+    const r0 = await create(ref, { phase: 'deep', id: 'v', target: TARGET })
+    await run(ref, r0.dir)
+    const S = (await readJsonl(join(r0.dir, 'ops.jsonl'))).find(r => r.key === 't001/verified-candidate').seq
+    const e = await engineEnv(OPTS)
+    const { dir } = await create(e, { phase: 'deep', id: 'v', target: TARGET })
+    assert.equal((await run(e, dir, { fault: { atSeq: S, mode: 'throw', when: 'before' } })).status, 'paused_infra')
+    // An editor (or a process left behind) writes into the root while the lineage is paused.
+    writeFileSync(join(e.layout('v').projectRoot('t001'), 'edited-during-pause.txt'), 'never inspected\n')
+    assert.equal((await run(e, dir)).status, 'completed')
+    const result = readJson(join(dir, 'result.json'))
+    const j = await OpJournal.open(dir)
+    assert.equal(existsSync(join(result.candidate_copy, 'tree', 'edited-during-pause.txt')), false, 'the uninspected file is not in the scored candidate')
+    assert.equal(result.candidate_changed_after_verdict, true)
+    assert.equal(j.result('t001/verified-candidate').rootFp, j.result('t001/g1/pre').fp)
+    assert.equal(await treeFingerprint(join(j.result('t001/verified-candidate').dir, 'tree')), result.candidate_digest)
+  })
+
+  it('a journal without the capture in its inspection pauses rather than capture a changed root', async () => {
+    const ref = await engineEnv(OPTS)
+    const r0 = await create(ref, { phase: 'deep', id: 'w', target: TARGET })
+    await run(ref, r0.dir)
+    const S = (await readJsonl(join(r0.dir, 'ops.jsonl'))).find(r => r.key === 't001/verified-candidate').seq
+    const e = await engineEnv(OPTS)
+    const { dir } = await create(e, { phase: 'deep', id: 'w', target: TARGET })
+    assert.equal((await run(e, dir, { fault: { atSeq: S, mode: 'throw', when: 'before' } })).status, 'paused_infra')
+    // As an older engine recorded it: the post result holds no capture.
+    const ops = join(dir, 'ops.jsonl')
+    const lines = readFileSync(ops, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+    for (const record of lines) if (record.key === 't001/g1/post' && record.status === 'done' && record.result) delete record.result.verified
+    writeFileSync(ops, `${lines.map(record => JSON.stringify(record)).join('\n')}\n`)
+    writeFileSync(join(e.layout('w').projectRoot('t001'), 'edited-during-pause.txt'), 'never inspected\n')
+    const paused = await run(e, dir)
+    assert.equal(paused.status, 'paused_infra')
+    assert.equal(paused.infra.cls, 'candidate_changed_before_capture')
+  })
+})
 
 describe('deep lineage', () => {
   it('learns a target FAIL, practices with an evidence round, then a fresh target PASS ends curriculum-ready', async () => {

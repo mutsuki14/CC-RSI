@@ -16,6 +16,7 @@ import {
 } from '../../lib/engine/records.mjs'
 import { MemoryStore } from '../../lib/memory/store.mjs'
 import { create, engineEnv, events, invocations, protocolEvents, readJson, REPO_ROOT, run, storeJournal } from './_engine.mjs'
+import { readJsonl as readJsonlRecords } from '../../lib/core/jsonl.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 
@@ -232,6 +233,69 @@ describe('daemon and resume', () => {
     assert.equal(e.fake.log().filter(entry => entry.ccRsi?.CC_RSI_ROLE).length, 0, 'no role child ran on the changed code')
   })
 
+  it('an accepted drift survives the deletion of the old plugin version dir (r2-engine-1)', async () => {
+    const world = { waves: [[{ id: 'a' }]], actors: { 'w001-a': { apiErrorOnce: { status: 401, error: 'authentication_failed' } } } }
+    const copy = async (from, prefix) => {
+      const to = await tmpDir(prefix)
+      for (const sub of ['lib', 'hooks', 'prompts']) cpSync(join(from, sub), join(to, sub), { recursive: true })
+      return to
+    }
+    // The version dir the lineage started from is cleaned up after an update to identical code.
+    const e = await engineEnv({ world })
+    const v1 = await copy(REPO_ROOT, 'cc-rsi-plugin-v1-')
+    const { dir } = await create(e, { phase: 'broad', id: 'gone', direction: 'd', pluginRoot: v1 })
+    assert.equal((await run(e, dir, { pluginRoot: v1 })).status, 'paused_infra')
+    const v2 = await copy(v1, 'cc-rsi-plugin-v2-')
+    rmSync(v1, { recursive: true, force: true })
+    assert.equal((await admitResume(dir, { pluginRoot: v2, env: e.env })).ok, false, 'a vanished root is drift to accept')
+    const admitted = await admitResume(dir, { pluginRoot: v2, acceptDrift: true, env: e.env })
+    assert.equal(admitted.ok, true)
+    await applyResume(dir, admitted)
+    const resumed = await run(e, dir, { pluginRoot: v2 })
+    assert.equal(resumed.status, 'completed', JSON.stringify(resumed.infra))
+    // Drift accepted onto new code first, the old dir deleted afterwards.
+    const f = await engineEnv({ world })
+    const w1 = await copy(REPO_ROOT, 'cc-rsi-plugin-w1-')
+    const second = await create(f, { phase: 'broad', id: 'later', direction: 'd', pluginRoot: w1 })
+    assert.equal((await run(f, second.dir, { pluginRoot: w1 })).status, 'paused_infra')
+    const w2 = await copy(w1, 'cc-rsi-plugin-w2-')
+    writeFileSync(join(w2, 'lib', 'runtime', 'errors.mjs'), `${readFileSync(join(w2, 'lib', 'runtime', 'errors.mjs'), 'utf8')}\n// v2\n`)
+    await applyResume(second.dir, await admitResume(second.dir, { pluginRoot: w2, acceptDrift: true, env: f.env }))
+    rmSync(w1, { recursive: true, force: true })
+    const later = await run(f, second.dir, { pluginRoot: w2 })
+    assert.equal(later.status, 'completed', JSON.stringify(later.infra))
+  })
+
+  it('accepting drift whose templates reword a sent message replays the recorded reply (r2-engine-2)', async () => {
+    const e = await engineEnv({ world: { waves: [[{ id: 'a' }]], actors: { 'w001-a': { apiErrorOnce: { status: 401, error: 'authentication_failed' } } } } })
+    const { dir } = await create(e, { phase: 'broad', id: 'reword', direction: 'd' })
+    const first = await run(e, dir)
+    assert.equal(first.status, 'paused_infra')
+    // The update changes engine code and one sentence of the Curriculum contract the first wave already sent.
+    const v2 = await tmpDir('cc-rsi-plugin-v2-')
+    for (const sub of ['lib', 'hooks', 'prompts']) cpSync(join(REPO_ROOT, sub), join(v2, sub), { recursive: true })
+    writeFileSync(join(v2, 'lib', 'runtime', 'errors.mjs'), `${readFileSync(join(v2, 'lib', 'runtime', 'errors.mjs'), 'utf8')}\n// v2\n`)
+    const contract = join(v2, 'prompts', 'curriculum-runtime-contract.md')
+    writeFileSync(contract, `${readFileSync(contract, 'utf8')}\nOne more sentence in v2.\n`)
+    const admitted = await admitResume(dir, { pluginRoot: v2, acceptDrift: true, env: e.env })
+    assert.equal(admitted.ok, true)
+    // applyResume refreshes the snapshot from the running plugin (the engine's own prompts dir).
+    await applyResume(dir, admitted)
+    const snapshot = join(e.layout('reword').promptsSnapshot, 'curriculum-runtime-contract.md')
+    writeFileSync(snapshot, `${readFileSync(snapshot, 'utf8')}\nOne more sentence in v2.\n`)
+    const resumed = await run(e, dir, { pluginRoot: v2 })
+    assert.equal(resumed.status, 'completed', JSON.stringify(resumed.infra))
+    const drifted = (await events(dir)).filter(ev => ev.type === 'REPLAY_TEXT_DRIFT')
+    assert.ok(drifted.some(ev => ev.op === 'w001/cur/m1' && ev.status === 'done'), 'the recorded Curriculum reply was replayed and reported')
+    // A changed message of a record written after the accepted drift is still a divergence.
+    const { ReplayDivergence } = await import('../../lib/engine/journal.mjs')
+    const j = await OpJournal.open(dir)
+    const sent = j.keysWithPrefix('w001/cur/').find(key => j.isDone(key))
+    await assert.rejects(j.op('late-send', 'send', { ctx: 'x', msgSha: 'a', phase: 'p' }, async () => 1, { tolerate: { shapeSha: 's' } }).then(() =>
+      j.op('late-send', 'send', { ctx: 'x', msgSha: 'b', phase: 'p' }, async () => 2, { tolerate: { shapeSha: 's' } })), ReplayDivergence)
+    assert.ok(sent)
+  })
+
   it('an engine whose lease was taken over stops without touching the journal or the state (memory-crash-9)', async () => {
     const e = await engineEnv({ world: { waves: [[{ id: 'slow' }]], actors: { 'w001-slow': { hangOnce: 60000 } } } })
     const { dir } = await create(e, { phase: 'broad', id: 'fenced', direction: 'd' })
@@ -310,6 +374,63 @@ describe('daemon and resume', () => {
     const { journal } = await storeJournal(e)
     assert.deepEqual(journal.map(c => [c.episode, c.created]), [['lostmeta-w001-l', ['lesson-w001-l.md']]])
     assert.ok((await protocolEvents(dir)).some(ev => ev.type === 'MEMORY_CONFLICT_REBASED'), 'the same Actor re-applied its draft')
+  })
+
+  it('a crash anywhere in the repair of a lost draft record never loses the lesson (r2-engine-3)', async () => {
+    const WORLD = { waves: [[{ id: 'a' }]], afterWaves: 'SATURATED' }
+    const ref = await engineEnv({ world: WORLD })
+    const r0 = await create(ref, { phase: 'broad', id: 'ref', direction: 'd' })
+    await run(ref, r0.dir)
+    const S = (await readJsonlRecords(join(r0.dir, 'ops.jsonl'))).find(r => r.key === 'w001/learn:a/commit:1' && r.status === 'start').seq
+    // After the meta is lost: commit:1 start S, done S+1 (draft_missing), rebase:1 start S+2, done S+3.
+    for (const fault of [{ atSeq: S + 1, when: 'before' }, { atSeq: S + 3, when: 'before' }, { atSeq: S + 3, when: 'after' }]) {
+      const e = await engineEnv({ world: WORLD })
+      const { dir } = await create(e, { phase: 'broad', id: 'x', direction: 'd' })
+      assert.equal((await run(e, dir, { fault: { atSeq: S, mode: 'throw', when: 'before' } })).status, 'paused_infra')
+      for (const name of readdirSync(join(e.pl.store, 'drafts'))) if (name.endsWith('.json')) rmSync(join(e.pl.store, 'drafts', name))
+      assert.equal((await run(e, dir, { fault: { ...fault, mode: 'throw' } })).status, 'paused_infra', JSON.stringify(fault))
+      const last = await run(e, dir)
+      assert.equal(last.status, 'completed', `${JSON.stringify(fault)}: ${JSON.stringify(last.infra)}`)
+      const { journal } = await storeJournal(e)
+      assert.deepEqual(journal.map(c => c.created), [['lesson-w001-a.md']], JSON.stringify(fault))
+    }
+  })
+
+  it('the lost-draft repair is idempotent in every intermediate state (r2-engine-3)', async () => {
+    const { rebaseOrRepair } = await import('../../lib/engine/learn.mjs')
+    const e = await engineEnv()
+    const store = await MemoryStore.open(e.pl.store, { sessionsDir: e.pl.sessions, lineagesDir: e.pl.lineages })
+    const owner = { kind: 'engine', pid: process.pid, host: (await import('node:os')).hostname(), lineage: 'x' }
+    const base = await tmpDir()
+    const work = (dir, text) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'lesson.md'), text) }
+    // A commit lands so the canonical tree differs from an older copy.
+    await store.openDraft('seed', { dir: join(base, 'seed'), fresh: true, owner })
+    writeFileSync(join(base, 'seed', 'seed.md'), 'seed\n')
+    await store.commit('seed', { kind: 'practice' })
+    const dirOf = n => join(base, n, 'memory')
+    // (1) No record, the Actor's directory only.
+    work(dirOf('one'), 'one')
+    assert.deepEqual(await rebaseOrRepair(store, 'one', dirOf('one'), owner), { prevDir: `${dirOf('one')}.prev` })
+    assert.equal(readFileSync(join(`${dirOf('one')}.prev`, 'lesson.md'), 'utf8'), 'one')
+    assert.ok(existsSync(join(dirOf('one'), 'seed.md')), 'the current memory opened in its place')
+    // (2) Interrupted after the rename: .prev only.
+    work(`${dirOf('two')}.prev`, 'two')
+    await rebaseOrRepair(store, 'two', dirOf('two'), owner)
+    assert.equal(readFileSync(join(`${dirOf('two')}.prev`, 'lesson.md'), 'utf8'), 'two')
+    assert.ok(await store.getDraft('two'))
+    // (3) Interrupted inside the open: an untouched copy of an OLDER canonical tree beside .prev.
+    work(`${dirOf('three')}.prev`, 'three')
+    mkdirSync(dirOf('three'), { recursive: true }) // the empty tree before the seed commit
+    await rebaseOrRepair(store, 'three', dirOf('three'), owner)
+    assert.equal(readFileSync(join(`${dirOf('three')}.prev`, 'lesson.md'), 'utf8'), 'three', 'the Actor\'s .prev is never moved aside for a copy')
+    assert.deepEqual(readdirSync(base).filter(n => n.startsWith('three') && n !== 'three'), [])
+    assert.deepEqual(readdirSync(join(base, 'three')).sort(), ['memory', 'memory.prev'])
+    // (4) Repeated after it finished (meta, pristine draft, .prev): unchanged.
+    await rebaseOrRepair(store, 'three', dirOf('three'), owner)
+    assert.equal(readFileSync(join(`${dirOf('three')}.prev`, 'lesson.md'), 'utf8'), 'three')
+    // (5) Nothing of the Actor's left: refused, never an empty draft.
+    await assert.rejects(rebaseOrRepair(store, 'none', dirOf('none'), owner), e2 => e2.code === 'memory_draft_missing')
+    await store.close()
   })
 
   it('shows contexts with --fork-session hints and never report text', async () => {

@@ -72,6 +72,10 @@ test('Verifier charter continuity, prior reports, decision contract and validati
   assert.match(R.verifierCharter({ ...base, mechanical: '  ' }), /---\n\(none captured\)\n---/)
   assert.match(R.verifierCharter({ ...base, changedSinceLast: 'MODIFIED: a.py' }), /CHANGED SINCE YOUR LAST INSPECTION/)
   assert.ok(!/CHANGED SINCE/.test(R.verifierCharter({ ...base, changedSinceLast: '' })))
+  // A context that did not perform the last inspection is told so (r2-interactive-9).
+  const earlier = R.verifierCharter({ ...base, changedSinceLast: 'MODIFIED: a.py', changedByEarlierContext: true })
+  assert.match(earlier, /CHANGED SINCE THE LAST INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\)/)
+  assert.ok(!/YOUR LAST INSPECTION/.test(earlier))
   // A practice context already contained in the mechanical context is not repeated.
   const pc = R.verifierPracticeContext({ phase: 1 })
   const once = R.verifierCharter({ ...base, mechanical: `${pc}\n\nCREATED: x`, practiceContext: pc })
@@ -95,6 +99,13 @@ test('the Verifier mechanics paragraph claims only the isolation actually used',
   }
   assert.match(replay, /fresh copy of the captured candidate/)
   assert.match(rollback, /checkpointed the candidate's files/)
+  // The interactive rollback checkpoint ('listed', the default) voids a PASS whose inspection left a
+  // pre-existing file changed, so that Verifier keeps them byte-identical (r2-interactive-1); a
+  // lineage target inspection ('full') is rolled back without that consequence.
+  assert.match(rollback, /Leave every file the candidate already has byte-identical: run destructive or mutating experiments on a copy in VERIFIER_SCRATCH/)
+  assert.match(rollback, /a PASS does not count as current verification of this workspace/)
+  const full = R.verifierSystem({ location: 'live', sandbox: false, allowUnverified: false, checkpoint: 'full' })
+  assert.ok(!/byte-identical/.test(full))
   assert.match(sandbox, /VERDICT: PASS or VERDICT: FAIL outside quotes/)
   assert.ok(!/UNVERIFIED/.test(sandbox))
   const unverified = R.verifierSystem({ location: 'live', sandbox: true, allowUnverified: true })

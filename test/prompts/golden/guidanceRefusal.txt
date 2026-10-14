@@ -14,6 +14,8 @@ Memory is sealed after a sealed evaluation: learning is refused until the user r
 learn needs a terminal Verifier verdict first: call submit (UNVERIFIED is not terminal).
 ===== stale_verdict =====
 The last verdict no longer covers the workspace: it changed since the inspection. Submit again so a verdict covers the current candidate.
+===== not_current_verdict =====
+The last PASS does not count as current verification: files the candidate already had changed while the Verifier inspected it (by the Verifier's own commands or another process), so it may have judged a different tree. Submit again so a verdict covers the candidate.
 ===== already_learned =====
 This experience was already promoted to durable memory; there is nothing left to learn from it.
 ===== quarantined =====

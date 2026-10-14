@@ -45,6 +45,9 @@ describe('paths', () => {
     })
     assert.equal(projectLayout('/h', 'k-1', { storeDir: '/global/mem' }).store, '/global/mem')
     assert.equal(projectLayout('/h', 'k-1', { storeDir: '' }).store, '/h/projects/k-1/store')
+    // A relative store dir is never resolved against the process cwd (r2-overblock-1).
+    assert.equal(projectLayout('/h', 'k-1', { storeDir: 'rsi-memory' }).store, '/h/projects/k-1/store')
+    assert.equal(projectLayout('/h', 'k-1', { storeDir: '~/rsi-memory' }).store, '/h/projects/k-1/store')
   })
 
   it('sessionLayout', () => {

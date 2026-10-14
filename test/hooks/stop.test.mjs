@@ -136,6 +136,31 @@ describe('Stop hook (nudge, the default)', () => {
     await stopHook(p, { transcript_path: transcript })
     assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).modelSource, 'model-switch')
   })
+
+  it('keeps the first transcript model: later turns on another model (opusplan, a fallback) never switch it (r2-interactive-8)', async () => {
+    const p = await ready()
+    const { sl } = layouts(p)
+    const transcript = join(p.home, 'actor-transcript.jsonl')
+    const turn = model => `${JSON.stringify({ type: 'assistant', message: { model, role: 'assistant', content: [] } })}\n`
+    writeFileSync(transcript, turn('claude-opus-5'))
+    await stopHook(p, { transcript_path: transcript })
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).model, 'claude-opus-5')
+    // A plan-mode or overload-fallback turn served by another model.
+    writeFileSync(transcript, turn('claude-opus-5') + turn('claude-sonnet-5'))
+    await stopHook(p, { transcript_path: transcript })
+    await hook('attest', fixture('pre-tool-use-mcp', p, { extra: { transcript_path: transcript } }), p.env)
+    const session = JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
+    assert.equal(session.model, 'claude-opus-5', 'the inheriting Verifier keeps its model and context')
+    assert.equal(session.modelSource, 'transcript')
+    // A new Claude Code process (--resume, maybe with another --model) derives it again.
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'resume' } }), p.env)
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).model, null)
+    await stopHook(p, { transcript_path: transcript })
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).model, 'claude-sonnet-5')
+    // A compaction is the same process: the model stays.
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'compact' } }), p.env)
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).model, 'claude-sonnet-5')
+  })
 })
 
 describe('Stop hook (gate)', () => {

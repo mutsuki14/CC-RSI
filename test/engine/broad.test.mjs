@@ -22,6 +22,51 @@ async function sessionPrompts(e, dir, ctxKey) {
   return ids.flatMap(id => (e.fake.session(id)?.turns ?? []).map(t => t.prompt))
 }
 
+describe('the Actor root put back across filesystems (r2-engine-7)', () => {
+  it('a crash while the moved-away copy is deleted never replaces the restored tree with a partial one', async () => {
+    const fsp = (await import('node:fs/promises')).default
+    const { syncBuiltinESMExports } = await import('node:module')
+    const { restoreActorRoot } = await import('../../lib/engine/inspect.mjs')
+    const base = await tmpDir()
+    const root = join(base, 'work', 'projects', 'w001-a')
+    const aside = join(base, 'priv', 'w001-a-actor-root')
+    mkdirSync(aside, { recursive: true })
+    for (const name of ['a.txt', 'b.txt', 'out.txt']) writeFileSync(join(aside, name), `${name}\n`)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'replay.txt'), 'the practice replay\n')
+    const { rename, rm } = fsp
+    // Different filesystems: renaming the Actor's tree back fails with EXDEV, so it is copied; the
+    // engine then dies while it deletes the moved-away copy (one file gone, then a crash).
+    let crash = true
+    fsp.rename = async (from, to) => {
+      if (from === aside && to === root) throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' })
+      return rename(from, to)
+    }
+    fsp.rm = async (path, options) => {
+      if (crash && (path === aside || String(path).startsWith(`${aside}.trash-`))) {
+        crash = false
+        await rm(join(path, 'a.txt'), { force: true })
+        throw new Error('injected crash while deleting the moved-away tree')
+      }
+      return rm(path, options)
+    }
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(restoreActorRoot(root, aside), /injected crash/)
+      // The recovering op runs the same step again.
+      await restoreActorRoot(root, aside)
+    } finally {
+      fsp.rename = rename
+      fsp.rm = rm
+      syncBuiltinESMExports()
+    }
+    assert.deepEqual(readdirSync(root).sort(), ['a.txt', 'b.txt', 'out.txt'], 'the restored Actor tree is complete')
+    assert.equal(existsSync(aside), false)
+    await restoreActorRoot(root, aside)
+    assert.deepEqual(readdirSync(join(base, 'priv')), [], 'no trash is left behind')
+  })
+})
+
 describe('broad lineage', () => {
   it('runs two waves from snapshots, consolidates serially in authored order, then ends SATURATED', async () => {
     const e = await engineEnv({ world: { waves: [wave('beta', 'alpha'), wave('gamma')], afterWaves: 'SATURATED', verdicts: { 'w001-alpha': ['FAIL'], '*': ['PASS'] } } })
@@ -204,17 +249,53 @@ describe('broad lineage', () => {
       const ref = await referenceRun()
       const e = await engineEnv({ world: retryWorld })
       const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
-      // The receipt path is a non-empty directory: the atomic rename onto it fails (after the move).
+      // The receipt path is a non-empty directory: the atomic rename onto it fails. The intent
+      // receipt is written before anything moves (r2-engine-8), so nothing was moved.
       const blocker = join(e.layout('ab').priv, 'w001', 'projects', 'alpha', 'infra_attempts', 'a1.retry_receipt.json')
       mkdirSync(join(blocker, 'x'), { recursive: true })
       const first = await run(e, dir)
       assert.equal(first.status, 'paused_infra')
-      assert.equal(existsSync(e.layout('ab').projectRoot('w001-alpha')), false) // moved aside before the failure
+      assert.ok(existsSync(e.layout('ab').projectRoot('w001-alpha')), 'nothing moved before the receipt could be written')
       rmSync(blocker, { recursive: true, force: true })
       const second = await resumeToEnd(e, dir)
       assert.equal(second.status, 'completed', JSON.stringify(second.infra))
       const receipt = await assertCompletedLikeReference(e, dir, ref)
       assert.equal(receipt.attempt, 1)
+    })
+
+    it('a crash between archiving the root and rewriting the receipt keeps the class and the archive (r2-engine-8)', async () => {
+      const ref = await referenceRun()
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      const priv = join(e.layout('ab').priv, 'w001', 'projects', 'alpha')
+      const receiptPath = join(priv, 'infra_attempts', 'a1.retry_receipt.json')
+      const fsp = (await import('node:fs/promises')).default
+      const { syncBuiltinESMExports } = await import('node:module')
+      const { rename } = fsp
+      let writes = 0
+      // The second write of the receipt (after the root was archived) dies.
+      fsp.rename = async (from, to) => {
+        if (to === receiptPath && ++writes === 2) throw new Error('injected crash before the receipt was rewritten')
+        return rename(from, to)
+      }
+      syncBuiltinESMExports()
+      let first
+      try {
+        first = await run(e, dir)
+      } finally {
+        fsp.rename = rename
+        syncBuiltinESMExports()
+      }
+      assert.equal(first.status, 'paused_infra')
+      assert.equal(existsSync(e.layout('ab').projectRoot('w001-alpha')), false, 'the root was archived before the crash')
+      const second = await resumeToEnd(e, dir)
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const receipt = await assertCompletedLikeReference(e, dir, ref)
+      assert.equal(receipt.cls, 'crash', 'the abandoning class survives in the intent receipt')
+      assert.equal(receipt.moved, join(priv, 'infra_attempts', 'attempt_001'))
+      assert.ok(existsSync(receipt.moved), 'the receipt points at the archived attempt')
+      const restarted = (await protocolEvents(dir)).filter(ev => ev.type === 'PROJECT_RESTARTED_UNSCORED')
+      assert.deepEqual(restarted.map(ev => ev.cls), ['crash'])
     })
   })
 

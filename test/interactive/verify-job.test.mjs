@@ -162,6 +162,30 @@ describe('verification job', () => {
     assert.equal(scanBash('cat README.md && ls src', opts), null)
   })
 
+  it('the interactive Verifier reads its own temp files and persisted tool results; others stay hidden (r2-engine-5, r2-interactive-5)', async () => {
+    const p = await setupProject()
+    const { sl } = layouts(p)
+    const uid = process.getuid()
+    const cfg = await tmpDir('cc-rsi-cfg-')
+    const env = { ...p.env, HOME: p.home, CLAUDE_CONFIG_DIR: cfg, TMPDIR: '/tmp' }
+    const sessionId = randomUUID()
+    const scratch = join(p.home, 'vscratch', 'x')
+    const spec = verifierSpec({ job: { candidateRoot: p.repo, config: {}, verifier: { ctxKey: 'task-1-v1', sessionId } }, home: p.home, sl, scratch, sandbox: false, env })
+    assert.equal(spec.extraEnv.TMPDIR, join(scratch, '.tmp'))
+    const { buildPolicy } = await import('../../lib/runtime/policy.mjs')
+    const policy = buildPolicy(spec)
+    const bash = command => scanBash(command, { hidden: policy.hidden, hiddenTokens: policy.hiddenTokens, allowedPaths: policy.allowedPaths, home: policy.home, userHome: policy.userHome, cwd: policy.cwd })
+    const ownTask = join(scratch, '.tmp', `claude-${uid}`, 'slug', sessionId, 'tasks', 'abc.output')
+    assert.equal(bash(`tail -5 ${ownTask}`), null)
+    const slug = p.repo.replace(/[^a-zA-Z0-9]/g, '-')
+    const results = join(cfg, 'projects', slug, sessionId, 'tool-results', 'b938lf2vx.txt')
+    assert.equal(bash(`tail -50 ${results}`), null)
+    assert.ok(policy.readRoots.some(r => results.startsWith(`${r}/`)) && policy.allowedPaths.some(r => results.startsWith(`${r}/`)), 'Read is allowed by the role guard')
+    for (const command of [`tail -50 ${results.replace(sessionId, randomUUID())}`, `cat ${join(cfg, 'projects', slug)}/*.jsonl`, `cat /tmp/claude-${uid}/-other/s/tasks/a.output`]) {
+      assert.ok(bash(command), command)
+    }
+  })
+
   it('a sandboxed Verifier\'s settings deny reading the hidden roots (security-9)', async () => {
     const p = await setupProject()
     const { sl } = layouts(p)
@@ -471,6 +495,80 @@ describe('verification job', () => {
     assert.equal(existsSync(join(p.repo, 'stray.txt')), false)
     assert.equal(listLocksSync(locks).length, 0, 'released after the restore')
     assert.equal((await readTask(sl)).job, null)
+  })
+
+  it('a recovery that loses its lock never unlocks a half-restored root, and never deletes another recovery\'s lock (r2-concurrency-1, -2)', async () => {
+    const { Checkpoint } = await import('../../lib/workspace/checkpoint.mjs')
+    const { hostname } = await import('node:os')
+    const { machineId } = await import('../../lib/core/machine.mjs')
+    const { lockFileFor } = await import('../../lib/interactive/wslock.mjs')
+    const { realpathSync, rmSync } = await import('node:fs')
+    /** A job that died with its checkpoint open: its job file, checkpoint and sticky lock record. */
+    const deadJob = async p => {
+      const { file, job } = await queuedJob(p)
+      const root = realpathSync(p.repo)
+      const cpDir = join(layouts(p).sl.checkpoints, job.id)
+      await Checkpoint.take(root, { dir: cpDir, exclude: [] })
+      Object.assign(job, { status: 'running', pid: deadPid(), host: hostname(), machine: machineId(), heartbeatAt: new Date(Date.now() - 600000).toISOString(),
+        checkpoint: { dir: cpDir, open: true, detectOnly: false } })
+      await writeJsonAtomic(file, job)
+      const locks = layouts(p).g.locks
+      mkdirSync(locks, { recursive: true })
+      writeFileSync(lockFileFor(locks, root), `${JSON.stringify({ pid: job.pid, host: hostname(), machine: machineId(), token: 'dead:1', at: new Date().toISOString(),
+        owner: { root, jobId: job.id, sessionId: p.sid, jobFile: file, restoreFailed: false, checkpointOpen: true, pidStart: null } })}\n`)
+      return { file, job, root, cpDir, locks, lockPath: lockFileFor(locks, root) }
+    }
+    const load = Checkpoint.load
+    // (1) The restore fails, then the recovery finds its lock taken over: the root stays locked.
+    const p = await setupProject()
+    const one = await deadJob(p)
+    rmSync(one.root, { recursive: true, force: true })
+    writeFileSync(one.root, 'not a directory any more\n')
+    const other = recordPath => writeFileSync(recordPath, `${JSON.stringify({ pid: process.pid, host: hostname(), machine: machineId(), token: 'other-recovery:1', at: new Date().toISOString(), owner: { kind: 'job-recovery' } })}\n`)
+    Checkpoint.load = async dir => {
+      other(`${one.file}.recover.lock`)
+      return load.call(Checkpoint, dir)
+    }
+    try {
+      await assert.rejects(recoverJob(one.file, { env: p.env }), e => e.code === 'lock_lost')
+    } finally {
+      Checkpoint.load = load
+    }
+    const [kept] = listLocksSync(one.locks)
+    assert.ok(kept, 'the workspace lock record is kept')
+    assert.equal(kept.live, true)
+    assert.equal(kept.checkpointOpen, true)
+    assert.equal(existsSync(one.cpDir), true, 'the checkpoint is kept')
+    assert.match(readFileSync(`${one.file}.recover.lock`, 'utf8'), /other-recovery:1/, 'the other recovery\'s lock is not deleted')
+    // (2) A recovery whose lock is taken over before its restore never restores (nor disposes) at all.
+    const q = await setupProject()
+    const two = await deadJob(q)
+    q.write('src/app.txt', 'VERIFIER-SCRATCH\n')
+    const { LeaseLock } = await import('../../lib/core/lock.mjs')
+    const { LockTimeoutError } = await import('../../lib/core/errors.mjs')
+    let restoreCalls = 0
+    Checkpoint.load = async dir => {
+      const cp = await load.call(Checkpoint, dir)
+      const restore = cp.restore.bind(cp)
+      cp.restore = async (...args) => { restoreCalls++; return restore(...args) }
+      return cp
+    }
+    // The recovery lock's first fence finds it taken over (as after a stall past its lease).
+    const assertHeld = LeaseLock.prototype.assertHeld
+    LeaseLock.prototype.assertHeld = async function () {
+      if (this.path.endsWith('.recover.lock')) throw new LockTimeoutError('lock_lost', 'taken over', { path: this.path })
+      return assertHeld.call(this)
+    }
+    try {
+      await assert.rejects(recoverJob(two.file, { env: q.env }), e => e.code === 'lock_lost')
+    } finally {
+      LeaseLock.prototype.assertHeld = assertHeld
+      Checkpoint.load = load
+    }
+    assert.equal(restoreCalls, 0, 'no restore after a lost fence')
+    assert.equal(q.read('src/app.txt'), 'VERIFIER-SCRATCH\n')
+    assert.equal(existsSync(two.cpDir), true)
+    assert.equal(listLocksSync(two.locks)[0]?.checkpointOpen, true, 'the root stays locked for the next recovery')
   })
 
   it('a --resume happens only on the transcript the last job left; an edited one starts a fresh context with the reports (security-3)', async () => {

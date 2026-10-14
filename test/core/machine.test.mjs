@@ -3,12 +3,12 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { LeaseLock } from '../../lib/core/lock.mjs'
-import { machineId, sameMachine } from '../../lib/core/machine.mjs'
+import { computeMachineId, machineId, sameMachine } from '../../lib/core/machine.mjs'
 import { jobIsDead } from '../../lib/interactive/task.mjs'
 import { listLocksSync, lockFileFor } from '../../lib/interactive/wslock.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
@@ -20,7 +20,44 @@ describe('machine identity', () => {
   it('is stable within a process and never the raw OS id', () => {
     const id = machineId()
     assert.equal(machineId(), id)
-    assert.ok(id === null || /^(os|home):[0-9a-f]{32}$/.test(id), id)
+    assert.ok(id === null || /^(os|local):[0-9a-f]{32}$/.test(id), id)
+  })
+
+  it('is never taken from a directory two machines may share, and differs per pid namespace (r2-concurrency-3)', async () => {
+    const dir = await tmpDir('cc-rsi-machine-')
+    // Two hosts that share one cc-rsi home and have no OS machine id: each keeps its own local id.
+    const home = join(dir, 'shared-home')
+    mkdirSync(join(home, 'run'), { recursive: true })
+    writeFileSync(join(home, 'run', 'machine-id'), `${'ab'.repeat(16)}\n`)
+    const a = computeMachineId({ osFiles: [], localPath: join(dir, 'host-a', 'machine-id'), platform: 'linux', nsPath: join(dir, 'none') })
+    const b = computeMachineId({ osFiles: [], localPath: join(dir, 'host-b', 'machine-id'), platform: 'linux', nsPath: join(dir, 'none') })
+    assert.match(a, /^local:[0-9a-f]{32}$/)
+    assert.notEqual(a, b)
+    assert.equal(computeMachineId({ osFiles: [], localPath: join(dir, 'host-a', 'machine-id'), platform: 'linux', nsPath: join(dir, 'none') }), a, 'stable')
+    // The id the old code kept in the shared home grants no sameness to another host's records.
+    assert.equal(sameMachine({ host: 'mac-b', machine: `home:${'ab'.repeat(16)}` }), false)
+    // Containers on one kernel (one /etc/machine-id, separate pid namespaces) are different machines.
+    const osFile = join(dir, 'os-machine-id')
+    writeFileSync(osFile, 'f00d\n')
+    symlinkSync('pid:[4026531836]', join(dir, 'ns1'))
+    symlinkSync('pid:[4026532999]', join(dir, 'ns2'))
+    const c1 = computeMachineId({ osFiles: [osFile], platform: 'linux', nsPath: join(dir, 'ns1') })
+    assert.notEqual(c1, computeMachineId({ osFiles: [osFile], platform: 'linux', nsPath: join(dir, 'ns2') }))
+    assert.equal(c1, computeMachineId({ osFiles: [osFile], platform: 'linux', nsPath: join(dir, 'ns1') }))
+    // macOS: the hardware UUID seeds the local id, so a lost id file comes back the same.
+    const m1 = computeMachineId({ osFiles: [], localPath: join(dir, 'mac-1', 'machine-id'), platform: 'darwin', uuid: () => 'UUID-1' })
+    assert.equal(m1, computeMachineId({ osFiles: [], localPath: join(dir, 'mac-1b', 'machine-id'), platform: 'darwin', uuid: () => 'UUID-1' }))
+    assert.notEqual(m1, computeMachineId({ osFiles: [], localPath: join(dir, 'mac-2', 'machine-id'), platform: 'darwin', uuid: () => 'UUID-2' }))
+  })
+
+  it('a live lease of another host that shared the old home id stays live (r2-concurrency-3)', async () => {
+    const dir = await tmpDir('cc-rsi-lock-')
+    const path = join(dir, 'x.lock')
+    // pid 1 exists here too; the other host's record must be judged by its lease, never by our pids.
+    writeFileSync(path, `${JSON.stringify({ pid: 999999, host: 'mac-a', machine: `home:${'ab'.repeat(16)}`, token: 'a:b', at: new Date().toISOString(), owner: {} })}\n`)
+    const verdict = await LeaseLock.inspect(path, { leaseMs: 60000 })
+    assert.equal(verdict.stale, false, verdict.reason)
+    assert.equal(await new LeaseLock(path, { leaseMs: 60000, heartbeatMs: 0 }).acquire({ wait: false }), false)
   })
 
   it('a record is this machine\'s by machine id or by hostname; the id never makes a same-host record foreign', () => {

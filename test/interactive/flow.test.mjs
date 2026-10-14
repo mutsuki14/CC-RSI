@@ -222,7 +222,7 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     await withClient(p, async client => {
       const r = await callTool(p, client, 'submit', {})
       assert.match(r.text, /VERDICT: PASS \(generation 1/)
-      assert.match(r.text, /NOTE: 1 pre-existing path\(s\) changed while the Verifier inspected the workspace and were restored afterwards \(src\/app\.txt\)/)
+      assert.match(r.text, /NOTE: 1 pre-existing path\(s\) changed during the inspection, by the Verifier's own commands .* or by another process: src\/app\.txt\. The harness restored them/)
       assert.match(r.text, /This verdict does not count as current: it cannot be learned/)
       assert.match(r.text, /HARNESS NOTE: 2 path\(s\) changed during the inspection and were restored: created-by-verifier\.txt, src\/app\.txt|HARNESS NOTE: \d path\(s\) changed during the inspection and were restored: .*src\/app\.txt/)
       assert.match(r.text, /HARNESS NOTE: \d file version\(s\) present at the end of the inspection were moved aside/)
@@ -232,10 +232,10 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     // A pre-existing file changed during the inspection: the PASS is not current (security-2).
     await withClient(p, async client => {
       const status = await callTool(p, client, 'status', {})
-      assert.match(status.text, /last verdict PASS \(stale: workspace changed since inspection\)/)
+      assert.match(status.text, /last verdict PASS \(not current: the candidate changed during the inspection\)/)
       const learn = await callTool(p, client, 'learn', {})
       assert.equal(learn.isError, true)
-      assert.match(learn.text, /no longer covers the workspace/)
+      assert.match(learn.text, /does not count as current verification/)
     })
     const [job] = jobsOf(p)
     const displaced = join(layouts(p).sl.displaced, job.id)
@@ -465,6 +465,58 @@ describe('interactive flow (fake claude + real server + real job)', () => {
     assert.match(seeded, /You are a fresh Verifier context on a different model/)
     assert.match(seeded, /PUBLISHED REPORTS OF THE EARLIER VERIFIER CONTEXT/)
     assert.doesNotMatch(seeded, /YOUR PRIOR PUBLISHED REPORTS|Your prior investigations remain yours/)
+    // It never hears of "your last inspection" either (r2-interactive-9).
+    assert.match(seeded, /CHANGED SINCE THE LAST INSPECTION \(by an earlier Verifier context, not by you; harness file comparison, not a grade\):/)
+    assert.match(seeded, /FILE-CHANGE EVIDENCE since the last inspection \(by an earlier Verifier context\):/)
+    assert.doesNotMatch(seeded, /YOUR LAST INSPECTION|since your last inspection/)
+  })
+
+  it('a PASS whose inspection changed a tracked file is consistently not current: no learn hint, its own refusal and status label (r2-interactive-1, -6)', async () => {
+    const p = await project({
+      files: { 'README.md': '# demo\n', 'src/app.txt': 'version 1\n', 'package-lock.json': '{"name":"demo","lockfileVersion":2}\n' },
+      config: { isolation: { sandbox: 'off' } },
+      script: { verifier: { default: { actions: [
+        { tool: 'Bash', command: 'printf \'{"name":"demo","lockfileVersion":3}\\n\' > package-lock.json; cat src/app.txt' },
+      ], text: 'src/app.txt says version 2 as requested.\nVERDICT: PASS' } } },
+    })
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      const r = await callTool(p, client, 'submit', {})
+      assert.match(r.text, /VERDICT: PASS/)
+      assert.doesNotMatch(r.text, /call learn/, 'no learn hint for a PASS that cannot be learned')
+      assert.match(r.text, /by the Verifier's own commands \(for example an install rewriting a lockfile, or a test run writing snapshots\) or by another process: package-lock\.json/)
+      const learn = await callTool(p, client, 'learn', {})
+      assert.equal(learn.isError, true)
+      assert.match(learn.text, /does not count as current verification: files the candidate already had changed while the Verifier inspected it/)
+      assert.doesNotMatch(learn.text, /changed since the inspection/)
+      const status = await callTool(p, client, 'status', {})
+      assert.match(status.text, /PASS \(not current: the candidate changed during the inspection\)/)
+    })
+  })
+
+  it('plugin options changed mid-session reach the server and the job (r2-interactive-4)', async () => {
+    const p = await setupProject({ script: { verifier: { default: { actions: [{ tool: 'Bash', command: 'ls' }], text: 'Not yet.\nVERDICT: FAIL' } } } })
+    homes.push(p.home)
+    // The session starts with saved options verifier_model=sonnet, sandbox=off (hooks and server agree).
+    const startEnv = { ...p.env, CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL: 'sonnet', CC_RSI_OPT_VERIFIER_MODEL: 'sonnet', CLAUDE_PLUGIN_OPTION_SANDBOX: 'off', CC_RSI_OPT_SANDBOX: 'off' }
+    await hook('session-start', payloads.sessionStart(p), startEnv)
+    // Mid-session the user saves opus and auto: the hooks and the reconnected server see them.
+    p.env = { ...p.env, CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL: 'opus', CC_RSI_OPT_VERIFIER_MODEL: 'opus', CLAUDE_PLUGIN_OPTION_SANDBOX: 'auto', CC_RSI_OPT_SANDBOX: 'auto' }
+    await userSays(p, 'Change src/app.txt to say version 2')
+    p.write('src/app.txt', 'version 2\n')
+    await withClient(p, async client => {
+      assert.match((await callTool(p, client, 'status', {})).text, /Verifier model: opus/)
+      assert.match((await callTool(p, client, 'submit', {})).text, /VERDICT: FAIL \(generation 1, isolation=\w+, model=opus\)/)
+    })
+    const [job] = jobsOf(p)
+    assert.equal(job.verifier.model, 'opus')
+    assert.equal(job.isolationWant, 'auto')
+    assert.deepEqual(JSON.parse(readFileSync(layouts(p).sl.sessionJson, 'utf8')).pluginOptions, { verifier_model: 'opus', sandbox: 'auto' })
+    // A server not yet reconnected (its env still says sonnet) follows the record the hooks refreshed.
+    const { mcpUserConfig } = await import('../../lib/interactive/session.mjs')
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'auto' }, { pluginOptions: { sandbox: 'off' } }), { sandbox: 'off' }, 'a substituted default never wins')
+    assert.deepEqual(mcpUserConfig({ CC_RSI_OPT_SANDBOX: 'require' }, { pluginOptions: { sandbox: 'off' } }), { sandbox: 'require' }, 'a newer saved value wins over a stale record')
   })
 
   it('submit refuses (infra, no job) when the plugin code changed since SessionStart (security-4)', async () => {

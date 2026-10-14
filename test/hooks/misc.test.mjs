@@ -10,7 +10,7 @@ import { run as rewakeRun, wakeClaimPath } from '../../lib/hooks/rewake.mjs'
 import { resolveVerifierModel, transcriptModelSync } from '../../lib/interactive/session.mjs'
 import { ROOT, deadPid, fixture, hook, layouts, setupProject } from '../interactive/harness.mjs'
 
-const SUBS = ['session-start', 'prompt', 'guard', 'attest', 'rewake', 'stop', 'model', 'session-end']
+const SUBS = ['session-start', 'prompt', 'guard', 'attest', 'rewake', 'schedule', 'stop', 'model', 'session-end']
 
 describe('attest hook', () => {
   it('writes one 0600 attestation per tool_use_id with the caller identity', async () => {
@@ -182,22 +182,27 @@ describe('plugin wiring files', () => {
     const hooks = JSON.parse(readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8'))
     const cmd = (sub, timeout, extra = {}) => ({ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs', sub], timeout, ...extra })
     assert.deepEqual(hooks, {
-      description: 'cc-rsi: RSI protocol for the main (Actor) session — protocol context, verbatim request capture, private-path guard, verification lock, MCP attestation, verdict wake-up, stop policy',
+      description: 'cc-rsi: RSI protocol for the main (Actor) session — protocol context, verbatim request capture, private-path guard, verification lock, MCP attestation, scheduled-prompt ledger, verdict wake-up, stop policy',
       hooks: {
         SessionStart: [{ matcher: 'startup|resume|clear|compact|fork', hooks: [cmd('session-start', 20)] }],
         UserPromptSubmit: [{ hooks: [cmd('prompt', 15)] }],
         PreToolUse: [
-          { matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor|CronCreate|ScheduleWakeup|RemoteTrigger', hooks: [cmd('guard', 10)] },
+          { matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor', hooks: [cmd('guard', 10)] },
           { matcher: '^mcp__plugin_cc-rsi_rsi__', hooks: [cmd('attest', 10)] },
         ],
-        PostToolUse: [{ matcher: '^mcp__plugin_cc-rsi_rsi__(submit|wait_verdict)$', hooks: [cmd('rewake', 7200, { asyncRewake: true })] }],
+        PostToolUse: [
+          { matcher: '^mcp__plugin_cc-rsi_rsi__(submit|wait_verdict)$', hooks: [cmd('rewake', 7200, { asyncRewake: true })] },
+          // The scheduled-prompt ledger is written after a scheduling call succeeded (r2-overblock-3).
+          { matcher: 'CronCreate|ScheduleWakeup|RemoteTrigger|CronDelete', hooks: [cmd('schedule', 10)] },
+        ],
         Stop: [{ hooks: [cmd('stop', 15)] }],
         PostModelSwitch: [{ hooks: [cmd('model', 10)] }],
         SessionEnd: [{ hooks: [cmd('session-end', 1)] }],
       },
     })
-    // The first PreToolUse matcher is an exact list; no hook declares onFailure (main-session hooks fail open).
+    // The first PreToolUse matcher and the ledger matcher are exact lists; no hook declares onFailure (main-session hooks fail open).
     assert.match(hooks.hooks.PreToolUse[0].matcher, /^[A-Za-z0-9_\- ,|]+$/)
+    assert.match(hooks.hooks.PostToolUse[1].matcher, /^[A-Za-z0-9_\- ,|]+$/)
     assert.ok(!JSON.stringify(hooks).includes('onFailure'))
     assert.ok(!JSON.stringify(hooks).includes('user_config'))
   })

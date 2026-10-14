@@ -217,6 +217,84 @@ describe('LeaseLock', () => {
     assert.deepEqual((await readdir(dir)).sort(), [], 'no guard, aside or temporary file is left behind')
   })
 
+  it('a crash-left guard of a dead pid here is broken at once; a future-dated one never outlives waitMs (r2-concurrency-5)', async () => {
+    const dir = await tmpDir()
+    const path = join(dir, 'x.lock')
+    const guard = `${path}.takeover`
+    // The guard names its holder: a dead process of this machine left it, so no 5 s wait.
+    await writeFile(path, JSON.stringify({ pid: DEAD_PID, host: hostname(), token: 'dead:1', at: '' }))
+    await writeFile(guard, JSON.stringify({ pid: DEAD_PID, host: hostname(), nonce: 'gone:1' }))
+    let started = Date.now()
+    const lock = new LeaseLock(path, { waitMs: 5000, pollMs: 5 })
+    assert.equal(await lock.acquire(), true)
+    assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`)
+    await lock.release()
+    // A guard stamped 20 s ahead (a clock stepped back, a skewed host): acquire keeps its waitMs.
+    await writeFile(path, JSON.stringify({ pid: 999999, host: 'elsewhere', token: 'x:1' }))
+    const old = new Date(Date.now() - 3600_000)
+    await utimes(path, old, old)
+    await writeFile(guard, '')
+    const future = new Date(Date.now() + 20_000)
+    await utimes(guard, future, future)
+    started = Date.now()
+    await assert.rejects(new LeaseLock(path, { waitMs: 500, pollMs: 25 }).acquire(), LockTimeoutError)
+    assert.ok(Date.now() - started < 3000, `acquire({ waitMs: 500 }) took ${Date.now() - started} ms`)
+    assert.equal(await new LeaseLock(path, { waitMs: 500, pollMs: 25 }).acquire({ wait: false }), false)
+    // A guard dated far beyond any skew is stale.
+    const far = new Date(Date.now() + 3600_000)
+    await utimes(guard, far, far)
+    const late = new LeaseLock(path, { waitMs: 2000, pollMs: 5 })
+    assert.equal(await late.acquire(), true)
+    await late.release()
+  })
+
+  it('several contenders breaking one stale guard never run their guarded sections at once (r2-concurrency-4)', async () => {
+    const dir = await tmpDir()
+    const TRIALS = 40
+    const WORKERS = 6
+    const path = join(dir, 'x.lock')
+    await writeFile(path, JSON.stringify({ pid: 1, token: 'x' }))
+    // Each trial plants a guard left 10 s ago by a holder of an unknown machine; every worker then
+    // runs a compare-and-delete whose predicate holds an O_EXCL marker for 3 ms.
+    const worker = `
+      const { LeaseLock } = await import(${JSON.stringify(LOCK_MODULE)})
+      const { closeSync, openSync, unlinkSync, existsSync } = await import('node:fs')
+      const { join } = await import('node:path')
+      const [dir, startAt, trials, slot] = process.argv.slice(1).map((v, i) => (i < 1 ? v : Number(v)))
+      const sleep = ms => new Promise(r => setTimeout(r, ms))
+      const spin = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+      let overlaps = 0
+      for (let t = 0; t < trials; t++) {
+        const at = startAt + t * slot
+        while (Date.now() < at) await sleep(Math.max(0, Math.min(5, at - Date.now() - 1)))
+        await LeaseLock.compareAndDelete(join(dir, 'x.lock'), () => {
+          let fd
+          try { fd = openSync(join(dir, 'inside'), 'wx') } catch (e) { if (e.code === 'EEXIST') overlaps++; return false }
+          spin(3)
+          closeSync(fd)
+          unlinkSync(join(dir, 'inside'))
+          return false
+        }, { pollMs: 1 })
+      }
+      process.stdout.write(String(overlaps))`
+    const SLOT_MS = 250
+    const startAt = Date.now() + 1500
+    const planter = (async () => {
+      for (let t = 0; t < TRIALS; t++) {
+        const at = startAt + t * SLOT_MS - 60
+        while (Date.now() < at) await sleep(5)
+        await writeFile(`${path}.takeover`, '')
+        const old = new Date(Date.now() - 10_000)
+        await utimes(`${path}.takeover`, old, old)
+      }
+    })()
+    const runs = await Promise.all(Array.from({ length: WORKERS }, () => runNode('--input-type=module',
+      ['-e', worker, dir, String(startAt), String(TRIALS), String(SLOT_MS)], { timeoutMs: 90000 })))
+    await planter
+    for (const run of runs) assert.equal(run.code, 0, run.stderr)
+    assert.deepEqual(runs.map(r => Number(r.stdout)), Array(WORKERS).fill(0), 'two processes were inside the guard at once')
+  })
+
   it('compareAndDelete and compareAndReplace act only when the predicate holds under the guard', async () => {
     const dir = await tmpDir()
     const path = join(dir, 'locks', 'r.json')

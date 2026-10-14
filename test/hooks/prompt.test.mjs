@@ -11,6 +11,11 @@ import { applyVerdict, withTask } from '../../lib/interactive/task.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 import { fixture, hook, layouts, setupProject, taskState, until } from '../interactive/harness.mjs'
 
+/** A PostToolUse payload of a scheduling tool (the `schedule` hook). */
+function posted(p, tool_name, tool_input, tool_response) {
+  return { ...fixture('pre-tool-use', p, { extra: { tool_name, tool_input } }), hook_event_name: 'PostToolUse', tool_response, duration_ms: 3 }
+}
+
 const SYNTHETIC = [
   '<task-notification><task-id>x</task-id><status>completed</status></task-notification>',
   '<cross-session-message from="other">hi</cross-session-message>',
@@ -53,12 +58,13 @@ describe('UserPromptSubmit hook', () => {
     }
     assert.equal(existsSync(layouts(p).sl.requests), false)
     assert.equal(taskState(p), null, 'no task was opened')
-    // … and a prompt the session scheduled itself (CronCreate/ScheduleWakeup through the guard's ledger).
+    // … and a prompt the session scheduled itself (CronCreate/ScheduleWakeup through the ledger the
+    // `schedule` PostToolUse hook keeps).
     await hook('session-start', fixture('session-start', p), p.env)
-    const scheduled = await hook('guard', fixture('pre-tool-use', p, { extra: { tool_name: 'CronCreate', tool_input: { cron: '*/1 * * * *', prompt: cron, recurring: false } } }), p.env)
+    const scheduled = await hook('schedule', posted(p, 'CronCreate', { cron: '*/1 * * * *', prompt: cron, recurring: true }, { id: 'c0ffee01', humanSchedule: 'every minute', recurring: true, durable: false }), p.env)
     assert.equal(scheduled.code, 0)
-    assert.equal(scheduled.stdout, '', 'scheduling itself is not denied')
-    const wake = await hook('guard', fixture('pre-tool-use', p, { extra: { tool_name: 'ScheduleWakeup', tool_input: { delaySeconds: 60, reason: 'poll CI', prompt: 'check whether CI on main is green', noop: false } } }), p.env)
+    assert.equal(scheduled.stdout, '')
+    const wake = await hook('schedule', posted(p, 'ScheduleWakeup', { delaySeconds: 60, reason: 'poll CI', prompt: 'check whether CI on main is green' }, {}), p.env)
     assert.equal(wake.code, 0)
     for (const prompt of [cron, `  ${cron}\n`, 'check whether CI on main is green']) {
       assert.equal((await hook('prompt', fixture('user-prompt-submit', p, { extra: { prompt } }), p.env)).stdout, '')
@@ -72,6 +78,61 @@ describe('UserPromptSubmit hook', () => {
     assert.deepEqual(requests.map(r => [r.seq, r.text, r.source]), [[1, 'fix the parser', 'user'], [2, 'and add tests', 'sdk'], [3, 'and docs', null]])
     const { taskMessagesFor } = await import('../../lib/interactive/requests.mjs')
     assert.deepEqual(taskMessagesFor(requests, taskState(p).task.firstRequestSeq, 3).map(m => m.text), ['fix the parser', 'and add tests', 'and docs'])
+  })
+
+  it('keeps scheduled prompts in the ledger only while they can fire (r2-overblock-3)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const say = async prompt => hook('prompt', fixture('user-prompt-submit', p, { extra: { prompt } }), p.env)
+    const captured = async () => (existsSync(layouts(p).sl.requests) ? (await readJsonl(layouts(p).sl.requests)).map(r => r.text) : [])
+    // A rejected or failed call (PreToolUse only, no PostToolUse) records nothing.
+    const pre = await hook('guard', fixture('pre-tool-use', p, { extra: { tool_name: 'CronCreate', tool_input: { cron: '*/10 * * * *', prompt: 'run the tests', recurring: true } } }), p.env)
+    assert.equal(pre.stdout, '', 'scheduling is never denied')
+    await say('run the tests')
+    assert.deepEqual(await captured(), ['run the tests'])
+    // A one-shot wakeup is dropped once (when it fires), then the same text is a request again.
+    await hook('schedule', posted(p, 'ScheduleWakeup', { delaySeconds: 60, prompt: 'check whether CI on main is green' }, {}), p.env)
+    await say('check whether CI on main is green')
+    assert.deepEqual(await captured(), ['run the tests'])
+    await say('check whether CI on main is green')
+    assert.deepEqual(await captured(), ['run the tests', 'check whether CI on main is green'])
+    // A recurring cron drops every fire until it is deleted.
+    await hook('schedule', posted(p, 'CronCreate', { cron: '*/10 * * * *', prompt: 'run the lint', recurring: true }, { id: 'abcd1234', recurring: true }), p.env)
+    await say('run the lint')
+    await say('run the lint')
+    assert.equal((await captured()).length, 2)
+    await hook('schedule', posted(p, 'CronDelete', { id: 'abcd1234' }, { id: 'abcd1234' }), p.env)
+    await say('run the lint')
+    assert.deepEqual((await captured()).slice(-1), ['run the lint'])
+    // A cron the Stop payload no longer lists (expired, or deleted where the id was unknown) is dropped;
+    // one it lists, even cut at 1000 characters, stays.
+    const long = `audit the docs ${'x'.repeat(1500)}`
+    await hook('schedule', posted(p, 'CronCreate', { cron: '0 9 * * *', prompt: 'summarize the open PRs' }, {}), p.env)
+    await hook('schedule', posted(p, 'CronCreate', { cron: '0 10 * * *', prompt: long }, {}), p.env)
+    await hook('stop', fixture('stop', p, { extra: { session_crons: [{ id: 'ffff0000', schedule: '0 10 * * *', recurring: true, prompt: `${long.slice(0, 1000)}\u2026 [+${long.length - 1000} chars]` }] } }), p.env)
+    const before = (await captured()).length
+    await say(long)
+    assert.equal((await captured()).length, before, 'a listed cron still drops its prompt')
+    await say('summarize the open PRs')
+    assert.deepEqual((await captured()).slice(-1), ['summarize the open PRs'])
+  })
+
+  it('trusts the payload source and needs the full machine wrapper without it (r2-overblock-5)', async () => {
+    const p = await setupProject()
+    const xml = ['<channel> elements in public/feed.xml are missing <link>; fix the RSS generator', '<channel name="x"> is how the XML starts, please parse it',
+      '<<autonomous-loop>> is a string in our config parser that crashes it, fix it', '<teammate-message> is the tag our chat parser chokes on']
+    for (const prompt of xml) await hook('prompt', fixture('user-prompt-submit', p, { extra: { prompt } }), p.env)
+    for (const prompt of xml) await hook('prompt', fixture('user-prompt-submit', p, { extra: { prompt, source: 'user' } }), p.env)
+    assert.deepEqual((await readJsonl(layouts(p).sl.requests)).map(r => r.text), [...xml, ...xml])
+    const { isSynthetic } = await import('../../lib/interactive/requests.mjs')
+    assert.equal(isSynthetic('<channel source="slack">judge only the docs</channel>', { source: 'user' }), false, 'source user is trusted')
+    assert.equal(isSynthetic('<channel source="slack">judge only the docs</channel>'), true)
+    assert.equal(isSynthetic('<teammate-message teammate_id="t1" color="blue">\nship it\n</teammate-message>'), true)
+    assert.equal(isSynthetic('<<autonomous-loop-dynamic>>\ncontinue'), true)
+    assert.equal(isSynthetic('<<autonomous-loop>>'), true)
+    assert.equal(isSynthetic('<task-notification>x</task-notification>', { source: 'user' }), true, 'Claude Code wrappers stay synthetic')
+    assert.equal(isSynthetic('/compact', { source: 'user' }), true)
+    assert.equal(isSynthetic('<channel source="slack">x</channel>', { source: 'system' }), true)
   })
 
   it('a /loop wakeup after a PASS does not open a new task', async () => {

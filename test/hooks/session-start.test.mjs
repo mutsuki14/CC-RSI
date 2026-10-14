@@ -97,6 +97,33 @@ describe('SessionStart hook', () => {
       writeFileSync(join(tree, rel), 'v1\n')
     }
     assert.equal(pluginCodeFingerprint(tree), base)
+    // Editor and file-manager litter is not code (r2-interactive-3).
+    for (const rel of ['lib/.DS_Store', 'lib/interactive/.verify-job.mjs.swp', 'hooks/role-guard.mjs~', 'prompts/verifier-system.md.orig']) {
+      writeFileSync(join(tree, rel), 'litter\n')
+      assert.equal(pluginCodeFingerprint(tree), base, rel)
+    }
+  })
+
+  it('a restarted (resumed or forked) session trusts the code it loaded and says so (r2-interactive-3)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const { sl } = layouts(p)
+    const first = JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
+    // The code changed in place while the session ran (a git pull in a --plugin-dir checkout).
+    await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
+    const start = async source => hook('session-start', fixture('session-start', p, { extra: { source } }), p.env)
+    const recorded = () => JSON.parse(readFileSync(sl.sessionJson, 'utf8')).pluginFingerprint
+    const changed = /NOTE: the cc-rsi plugin code changed since this session first started; the code now loaded is trusted/
+    assert.match((await start('resume')).json.systemMessage, changed)
+    assert.equal(recorded(), pluginCodeFingerprint(ROOT))
+    assert.doesNotMatch((await start('resume')).json.systemMessage, changed, 'only a real change is reported')
+    await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
+    assert.match((await start('fork')).json.systemMessage, changed)
+    assert.equal(recorded(), pluginCodeFingerprint(ROOT))
+    // Within one process (compaction, /clear) the baseline stays.
+    await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
+    await start('clear')
+    assert.equal(recorded(), 'f'.repeat(64))
   })
 
   it('the MCP server applies the options the hooks see, not the substituted manifest defaults', async () => {

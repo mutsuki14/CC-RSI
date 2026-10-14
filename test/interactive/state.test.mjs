@@ -416,6 +416,75 @@ describe('workspace locks', () => {
     assert.equal(existsSync(path), false)
   })
 
+  it('a recovery never rewrites a live recovery\'s record, and a fresh recovery lock is sticky from its first byte (r2-concurrency-2, -6)', async () => {
+    const home = await tmpDir('cc-rsi-home-')
+    const locks = join(home, 'run', 'locks')
+    mkdirSync(locks, { recursive: true })
+    const root = await tmpDir('cc-rsi-root-')
+    const path = lockFileFor(locks, root)
+    const jobFile = join(home, 'projects', 'p', 'sessions', 's1', 'jobs', 'j-A.json')
+    // Another recovery of j-A is at work (a live process of this machine, its own start token).
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' })
+    try {
+      const live = JSON.stringify({ pid: sleeper.pid, host: hostname(), token: 'recovery:other', at: new Date().toISOString(),
+        owner: { root, jobId: 'j-A', sessionId: 's1', jobFile, restoreFailed: false, checkpointOpen: true, recovering: true, pidStart: processStartToken(sleeper.pid) } })
+      writeFileSync(path, live)
+      const busy = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1', jobFile })
+      assert.ok(busy.busy, 'a live recovery\'s record is never rewritten')
+      assert.equal(busy.lock, undefined)
+      assert.equal(readFileSync(path, 'utf8'), live)
+    } finally {
+      sleeper.kill('SIGKILL')
+    }
+    await new Promise(resolve => sleeper.once('exit', resolve))
+    // Its process gone, the record is taken over (even with a fresh mtime).
+    const taken = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1', jobFile })
+    assert.ok(taken.lock)
+    await releaseWorkspaceLock(taken.lock)
+    // No record (released by `doctor --release-lock`, or by an earlier recovery): the fresh lock is
+    // checkpoint-open and recovering at once, so a recovery that dies mid-restore keeps the root locked.
+    const fresh = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1', jobFile })
+    assert.ok(fresh.lock)
+    const record = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(record.owner.checkpointOpen, true)
+    assert.equal(record.owner.recovering, true)
+    assert.equal(record.owner.jobFile, jobFile)
+    fresh.lock.stopHeartbeat()
+    // As if this recovery died: its record names a dead pid now.
+    writeFileSync(path, JSON.stringify({ ...record, pid: deadPid() }))
+    const [lock] = listLocksSync(locks, { now: Date.now() + 3600000 })
+    assert.equal(lock.live, true)
+    assert.equal(lock.recoveryPending, true)
+    await assert.rejects(acquireWorkspaceLock(locks, root, { jobId: 'j-B', sessionId: 's2' }), e => e.code === 'workspace_busy')
+  })
+
+  it('a taken-over lock that cannot be read right now is not lost (r2-concurrency-1)', async () => {
+    const home = await tmpDir('cc-rsi-home-')
+    const locks = join(home, 'run', 'locks')
+    mkdirSync(locks, { recursive: true })
+    const root = await tmpDir('cc-rsi-root-')
+    const path = lockFileFor(locks, root)
+    writeFileSync(path, JSON.stringify({ pid: deadPid(), host: hostname(), token: 'x:y', at: new Date().toISOString(),
+      owner: { root, jobId: 'j-A', sessionId: 's1', restoreFailed: false, checkpointOpen: true } }))
+    let lostCalls = 0
+    const taken = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1', onLost: () => { lostCalls++ } })
+    const text = readFileSync(path, 'utf8')
+    // A torn rewrite or a read error (EMFILE, EISDIR) proves nothing either way.
+    writeFileSync(path, text.slice(0, 20))
+    await assert.rejects(taken.lock.assertHeld(), e => e.code === 'lock_unknown')
+    unlinkSync(path)
+    mkdirSync(path)
+    await assert.rejects(taken.lock.assertHeld(), e => e.code === 'lock_unknown')
+    assert.equal(taken.lock.lost, false)
+    assert.equal(lostCalls, 0)
+    const { rmdirSync } = await import('node:fs')
+    rmdirSync(path)
+    writeFileSync(path, text)
+    await taken.lock.assertHeld()
+    await releaseWorkspaceLock(taken.lock)
+    assert.equal(existsSync(path), false, 'released by its own token')
+  })
+
   it('a live pid that is no longer the holder\'s process does not keep a lock live (portability-2)', async () => {
     const locks = await tmpDir('cc-rsi-locks-')
     const root = await tmpDir('cc-rsi-root-')

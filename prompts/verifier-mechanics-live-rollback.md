@@ -13,5 +13,8 @@ The candidate is too large for the harness to checkpoint: it only detects which 
 ## experiments-rollback
 Establish the original candidate's properties before destructive experiments; a property created only by your own test is not candidate evidence.
 
+## experiments-listed
+Establish the original candidate's properties before destructive experiments; a property created only by your own test is not candidate evidence. Leave every file the candidate already has byte-identical: run destructive or mutating experiments on a copy in VERIFIER_SCRATCH, and prefer commands that do not rewrite existing files (for example a clean install from the lockfile instead of an install that updates it, test runners in CI mode so they never write snapshots, linters and formatters without their fix or write options). If a file the candidate already has differs from the checkpoint when this inspection ends, whoever changed it, a PASS does not count as current verification of this workspace.
+
 ## experiments-detect
 A property created only by your own test is not candidate evidence.

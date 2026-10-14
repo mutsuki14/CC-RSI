@@ -117,6 +117,22 @@ describe('loadConfig precedence', () => {
     assert.equal(loadConfig({ home, projectRoot, cli: { memory: { dir: '/cli' } } }).config.memory.dir, '/cli')
   })
 
+  it('normalizes memory.dir: ~ expands to the user home, a relative path is refused (r2-overblock-1)', async () => {
+    const tilde = await setup({ global: { memory: { dir: '~/rsi-memory' } } })
+    const out = loadConfig({ home: tilde.home, projectRoot: tilde.projectRoot, env: { HOME: '/users/u' } })
+    assert.equal(out.config.memory.dir, '/users/u/rsi-memory')
+    assert.equal(out.sources['memory.dir'], 'global')
+    assert.equal(loadConfig({ home: tilde.home, cli: { memory: { dir: '~' } }, env: { HOME: '/users/u' } }).config.memory.dir, '/users/u')
+    assert.equal(loadConfig({ home: tilde.home, cli: { memory: { dir: '/a/b/../c/' } } }).config.memory.dir, '/a/c')
+    for (const dir of ['rsi-memory', './mem', '../mem', '~other/mem']) {
+      const rel = await setup({ global: { memory: { dir } } })
+      const { config, warnings, sources } = loadConfig({ home: rel.home, projectRoot: rel.projectRoot, env: { HOME: '/users/u' } })
+      assert.equal(config.memory.dir, '', dir)
+      assert.equal(sources['memory.dir'], 'default', dir)
+      assert.ok(warnings.some(w => w.includes('"memory.dir"') && w.includes('not an absolute path')), dir)
+    }
+  })
+
   it('the project file cannot weaken the exam-fence audit; lowering the rollback caps is warned about (security-11)', async () => {
     const { home, projectRoot } = await setup({
       project: { audit: { shingleWords: 1000000 }, interactive: { checkpointMaxBytes: 0, checkpointMaxFiles: 50000 } },

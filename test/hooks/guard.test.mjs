@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { acquireWorkspaceLock, markRestoreFailed, releaseWorkspaceLock } from '../../lib/interactive/wslock.mjs'
 import { withTask } from '../../lib/interactive/task.mjs'
-import { transcriptSlug } from '../../lib/hooks/guard.mjs'
+import { humanOnlyIn, transcriptSlug } from '../../lib/hooks/guard.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { shq, tmpDir } from '../_helpers/tmp.mjs'
 import { ROOT, deadPid, fixture, hook, layouts, setupProject } from '../interactive/harness.mjs'
@@ -160,7 +160,11 @@ describe('main-session guard', () => {
 
   it('meets the p95 < 150 ms budget for guard and attest', async () => {
     const p = await setupProject()
-    await started(p)
+    const { sl } = await started(p)
+    // With a Verifier id (the transcript rule is on) and a 200-line heredoc (r2-overblock-8).
+    await withTask(sl, s => { s.verifierSessionIds = ['7a9f86c9-0000-4000-8000-00000000000a']; s.task = { seq: 1, candidateRoot: p.repo, verifier: { sessionId: '7a9f86c9-0000-4000-8000-00000000000a' }, reports: [] } })
+    const body = Array.from({ length: 200 }, (_, i) => `rows.append({"id": ${i}, "path": "data/part-${i}.csv", "ok": glob.glob("out/*.txt")})  # see src/lib/f${i}.py`).join('\n')
+    const heredoc = `python3 - <<'EOF'\nimport glob\nrows = []\n${body}\nprint(len(rows))\nEOF`
     // A bare `node -e 0` spawn measured interleaved with the hooks is the machine's own floor. On an
     // idle machine the SPEC budget is asserted as is (p95 < 150 ms); on a loaded machine (a parallel
     // test run) single scheduling outliers dominate a p95, so the test asserts what the hook adds to
@@ -172,15 +176,16 @@ describe('main-session guard', () => {
       await fn()
       return Number(process.hrtime.bigint() - t0) / 1e6
     }
-    const samples = { guard: [], attest: [], node: [] }
+    const samples = { guard: [], heredoc: [], attest: [], node: [] }
     for (let i = 0; i < 15; i++) {
       samples.node.push(await timed(() => runNode('-e', ['0'], { env: p.env })))
       samples.guard.push(await timed(async () => assert.equal((await hook('guard', pre(p, 'Bash', { command: 'ls -la src && cat README.md' }), p.env)).code, 0)))
+      samples.heredoc.push(await timed(async () => assert.equal((await hook('guard', pre(p, 'Bash', { command: heredoc }), p.env)).json, null)))
       samples.attest.push(await timed(async () => assert.equal((await hook('attest', fixture('pre-tool-use-mcp', p, { extra: { tool_use_id: `toolu_timing_${i}` } }), p.env)).code, 0)))
     }
     const at = (list, q) => [...list].sort((a, b) => a - b)[Math.ceil(list.length * q) - 1]
     const idle = at(samples.node, 0.5) <= 80 && loadavg()[0] <= cpus().length / 2
-    for (const sub of ['guard', 'attest']) {
+    for (const sub of ['guard', 'heredoc', 'attest']) {
       const detail = `${sub}: p95 ${at(samples[sub], 0.95).toFixed(1)} ms, median ${at(samples[sub], 0.5).toFixed(1)} ms; node -e 0 median ${at(samples.node, 0.5).toFixed(1)} ms`
       if (idle) assert.ok(at(samples[sub], 0.95) < 150, detail)
       else assert.ok(at(samples[sub], 0.5) - at(samples.node, 0.5) < Math.max(100, 4 * at(samples.node, 0.5)), detail)
@@ -241,9 +246,14 @@ describe('main-session guard: Verifier transcripts, plugin code, external store'
       `sed -i 's/VERDICT: FAIL/VERDICT: PASS/' ${slugDir}/*.jsonl`,
       `cat "${slugDir}"/*.jsonl`,
       'grep -r VERDICT ~/.claude/projects',
-      'ls ~/.claude',
+      'python3 walk.py ~/.claude',
+      'cd ~/.claude && python3 walk.py .',
+      'python3 -c "import os; print(list(os.walk(\'$HOME/.claude/projects\')))"',
+      'bash -c "grep -r VERDICT ~/.claude"',
       'cat $HOME/.claude/*/-tmp-*/x.jsonl',
       `cd ${slugDir} && cat *.jsonl`,
+      'cd ~/.claude && grep -r VERDICT .',
+      'ls ~/.claude/projects/*/*.jsonl',
     ]) {
       const r = await bash(command)
       assert.equal(decision(r), 'deny', command)
@@ -251,7 +261,13 @@ describe('main-session guard: Verifier transcripts, plugin code, external store'
     }
     const fromHome = await hook('guard', pre(p, 'Bash', { command: 'cat .claude/projects/*/*.jsonl' }, { cwd: env.HOME }), env)
     assert.equal(decision(fromHome), 'deny', 'a relative glob from the user home')
-    for (const command of [`cat ${slugDir}/memory/MEMORY.md`, `head -50 ${slugDir}/${p.sid}/tool-results/out.txt`, 'cat ~/.claude/settings.json', 'ls ~/.claude/plugins', 'git status']) {
+    // Commands that name the config dir without walking it, and globs that stay in the allowed
+    // auto-memory, are not refused (r2-overblock-2).
+    for (const command of [`cat ${slugDir}/memory/MEMORY.md`, `head -50 ${slugDir}/${p.sid}/tool-results/out.txt`, 'cat ~/.claude/settings.json', 'ls ~/.claude/plugins', 'git status',
+      'ls ~/.claude', 'ls -la ~/.claude/', 'cd ~/.claude && git status', 'git -C ~/.claude log --oneline -5', 'cp .claude/settings.json ~/.claude/',
+      'ln -s ~/dotfiles/CLAUDE.md ~/.claude/', 'CLAUDE_CONFIG_DIR=~/.claude claude mcp list', "echo 'export CLAUDE_CONFIG_DIR=~/.claude' >> ~/.zshrc",
+      'git commit -m "docs: document the ~/.claude/ settings layout"', 'echo "see ~/.claude for config"', 'ls $HOME/.claude/', 'ls ~/.claude/projects',
+      'cat ~/.claude/projects/*/memory/MEMORY.md', 'grep -c x ~/.claude/projects/*/memory/MEMORY.md', 'ls ~/.claude/projects/*/memory']) {
       assert.equal((await bash(command)).json, null, command)
     }
   })
@@ -335,6 +351,39 @@ describe('main-session guard: Verifier transcripts, plugin code, external store'
     assert.equal(decision(await hook('guard', pre(p, 'Read', { file_path: join(layouts(p).sl.viewDir, 'INDEX.md') }), p.env)), 'allow')
   })
 
+  it('never makes project-wide searches impossible through a ~, relative or in-project memory.dir (r2-overblock-1)', async () => {
+    const searches = async (p, env) => {
+      for (const [tool, input] of [['Grep', { pattern: 'TODO' }], ['Glob', { pattern: '**/*.js' }], ['Bash', { command: 'grep -rn TODO .' }], ['Bash', { command: 'rg TODO' }]]) {
+        assert.equal((await hook('guard', pre(p, tool, input), env)).json, null, `${tool} ${JSON.stringify(input)}`)
+      }
+    }
+    // `~/…` is the user home, not a directory named `~` in the project.
+    const userHome = await tmpDir('cc-rsi-user-home-')
+    const p = await setupProject({ config: { memory: { dir: '~/rsi-memory' } } })
+    const env = { ...p.env, HOME: userHome }
+    assert.equal((await hook('session-start', fixture('session-start', p), env)).code, 0)
+    assert.ok(existsSync(join(userHome, 'rsi-memory', 'memory')), 'the store opened under the user home')
+    assert.ok(!existsSync(join(p.repo, '~')), 'no literal ~ directory in the project')
+    await searches(p, env)
+    assert.equal(decision(await hook('guard', pre(p, 'Read', { file_path: join(userHome, 'rsi-memory', 'journal.jsonl') }), env)), 'deny')
+    // A relative value is refused with a visible warning; the default store is used.
+    const q = await setupProject({ config: { memory: { dir: 'rsi-memory' } } })
+    const start = await hook('session-start', fixture('session-start', q), q.env)
+    assert.match(start.json?.systemMessage ?? '', /memory\.dir in ~\/\.cc-rsi\/config\.json is not an absolute path/)
+    assert.ok(!existsSync(join(q.repo, 'rsi-memory')))
+    await searches(q, q.env)
+    // An absolute store inside the project: direct paths stay private, searches pass, the user is warned.
+    const r = await setupProject()
+    const inside = join(r.repo, 'mem')
+    writeFileSync(join(r.home, 'config.json'), JSON.stringify({ memory: { dir: inside } }))
+    const warned = await hook('session-start', fixture('session-start', r), r.env)
+    assert.match(warned.json?.systemMessage ?? '', /memory\.dir \(.*\) lies inside this project: move it outside/)
+    await searches(r, r.env)
+    assert.equal(decision(await hook('guard', pre(r, 'Read', { file_path: join(inside, 'journal.jsonl') }), r.env)), 'deny')
+    assert.equal(decision(await hook('guard', pre(r, 'Bash', { command: 'cat mem/journal.jsonl' }), r.env)), 'deny')
+    assert.equal(decision(await hook('guard', pre(r, 'Grep', { pattern: 'x', path: inside }), r.env)), 'deny')
+  })
+
   it('gives Bash tree walks rooted above <home> the search reason, and globs into it the private reason (security-6)', async () => {
     const p = await setupProject()
     await started(p)
@@ -361,6 +410,27 @@ describe('main-session guard: Verifier transcripts, plugin code, external store'
       assert.match(reason(r), /human-only/, command)
     }
     assert.equal((await hook('guard', pre(p, 'Bash', { command: 'cc-rsi explore --report-exit status' }), p.env)).json, null)
+    // Free text that merely mentions the words is not a command (r2-overblock-4).
+    for (const command of ['git commit -m "cc-rsi explore: the guard now catches options before start"', 'git commit -m "cc-rsi: restore the view on resume"',
+      'node /x/bin/cc-rsi explore preflight --phase broad --direction "make the dev server start faster"']) {
+      assert.equal((await hook('guard', pre(p, 'Bash', { command }), p.env)).json, null, command)
+    }
+  })
+
+  it('parses human-only cc-rsi invocations instead of matching free text (r2-overblock-4)', () => {
+    const denied = ['cc-rsi eval run deep-1', 'cc-rsi explore --yes start', 'cc-rsi explore --report-exit start', 'cc-rsi explore --phase broad start',
+      "sh -c 'cc-rsi eval run x'", 'bash -lc "cc-rsi memory import /x"', 'eval cc-rsi verify cancel', '"$HOME/.cc-rsi/bin/cc-rsi" memory unfreeze',
+      'node /p/bin/cc-rsi doctor --release-lock /repo', 'node --no-warnings /p/bin/cc-rsi memory drafts --prune', 'cc-rsi memory verify --accept-external',
+      'env -u CLAUDECODE cc-rsi explore abandon deep-1', 'x=$(cc-rsi eval show deep-1)', 'find . -name x -exec cc-rsi eval run {} \\;',
+      'cc-rsi doctor --release-lock=/repo', 'cc-rsi explore resume deep-1 --accept-drift', 'echo y | cc-rsi memory restore 3']
+    for (const command of denied) assert.equal(humanOnlyIn(command), true, command)
+    assert.equal(humanOnlyIn('cc-rsi explore start --phase broad', { modelMayStart: true }), false)
+    const allowed = ['git commit -m "cc-rsi: fix explore start option parsing"', 'git commit -m "cc-rsi explore: handle resume after crash"',
+      'cat /u/src/cc-rsi/lib/sealed/eval.mjs | head -40', 'node --test /u/src/cc-rsi/test/sealed/eval.test.mjs', 'gh pr create --title "cc-rsi: fix memory import" --body "Fixes the import path"',
+      'gh issue create -R me/cc-rsi --title "cancel leaves the lock behind"', 'cat vendor/cc-rsi/lib/sealed/eval.mjs', 'git diff vendor/cc-rsi/lib/memory/import.mjs',
+      'node /x/bin/cc-rsi explore preflight --phase broad --direction "make the dev server start faster"', 'cc-rsi explore status', 'cc-rsi memory show',
+      'cc-rsi status', 'node -e "require(\'cc-rsi\')" eval', 'cc-rsi explore show deep-1', 'cc-rsi explore log deep-1 -n 5', 'cc-rsi doctor --live']
+    for (const command of allowed) assert.equal(humanOnlyIn(command), false, command)
   })
 
   it('starts the recovery of a job that died with its checkpoint open and explains the wait (memory-crash-2)', async () => {
