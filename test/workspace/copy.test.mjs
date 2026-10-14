@@ -7,8 +7,8 @@ import { existsSync } from 'node:fs'
 import { chmod, lstat, mkdir, readFile, readdir, readlink, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
-import { tmpDir } from '../_helpers/tmp.mjs'
-import { copyTree, makeReadOnly, makeWritable, moveAside, removeTree } from '../../lib/workspace/copy.mjs'
+import { tmpDir, unprivilegedSkip } from '../_helpers/tmp.mjs'
+import { copyTree, listTree, makeReadOnly, makeWritable, moveAside, removeTree, sortPaths } from '../../lib/workspace/copy.mjs'
 
 async function sampleTree() {
   const base = await tmpDir()
@@ -95,7 +95,7 @@ test('removeTree removes read-only trees, never follows links, refuses dangerous
   await assert.rejects(removeTree(''), { code: 'unsafe_remove' })
 })
 
-test('removeTree as an unprivileged user clears restrictive modes first', { skip: process.getuid?.() === 0 ? false : 'covered in-process when not root' }, async () => {
+test('removeTree as an unprivileged user clears restrictive modes first', { skip: process.getuid?.() === 0 ? unprivilegedSkip() : 'covered in-process when not root' }, async () => {
   const base = await tmpDir()
   execFileSync('chown', ['65534:65534', base])
   const script = `
@@ -155,4 +155,27 @@ test('makeReadOnly clears every write bit (directories after children); makeWrit
   assert.equal((await stat(join(view, 'd', 'f.txt'))).mode & 0o777, 0o644)
   await makeReadOnly(join(base, 'missing'))
   await makeWritable(join(base, 'missing'))
+})
+
+test('listTree with a limit walks in byte order and stops after `limit` files (portability-11)', async () => {
+  const base = await tmpDir()
+  const files = ['a.txt', 'a/x', 'a/y', 'a0', 'b/deep/z', 'c.txt', 'c/q']
+  for (const rel of files) {
+    await mkdir(join(base, rel, '..'), { recursive: true })
+    await writeFile(join(base, rel), rel)
+  }
+  await symlink('a.txt', join(base, 'a.link'))
+  const full = await listTree(base)
+  assert.equal(full.truncated, false)
+  assert.deepEqual(full.files, sortPaths(files))
+  // The prefix of the byte-ordered listing: 'a.txt' < 'a/x' because '.' < '/'.
+  const limited = await listTree(base, { limit: 3 })
+  assert.equal(limited.truncated, true)
+  assert.deepEqual(limited.files, ['a.txt', 'a/x', 'a/y'])
+  assert.deepEqual(limited.links, ['a.link'])
+  assert.deepEqual(limited.dirs, ['a'], 'directories after the cutoff are never entered')
+  const exact = await listTree(base, { limit: files.length })
+  assert.equal(exact.truncated, false)
+  assert.deepEqual(exact.files, full.files)
+  assert.equal((await listTree(base, { limit: 0 })).files.length, 0)
 })

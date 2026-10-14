@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { commandWords, hiddenReason, MUTATION_BASH_DENY, scanBash } from '../../lib/guard/bash.mjs'
+import { commandWords, coversHiddenReason, hiddenReason, MUTATION_BASH_DENY, scanBash } from '../../lib/guard/bash.mjs'
 import { canonicalRoot, isFileTool, isUnder, physicalPath, searchCoversHidden, toolPathArgs } from '../../lib/guard/paths.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 
@@ -63,6 +63,111 @@ test('scanBash: relative traversal and cd are resolved against the cwd', async (
   assert.equal(scanBash('git diff --stat HEAD~1 -- src/', opts), null)
   assert.equal(scanBash('ls ..', opts), null, 'the parent itself is not hidden')
   assert.equal(scanBash('python - <<EOF\nprint(1)\nEOF', opts), null)
+})
+
+/** A user home with cc-rsi state, a project and a symlink from the project to the home (security-6 probes). */
+async function homeLayout() {
+  const base = realpathSync(await tmpDir())
+  const userHome = join(base, 'uh')
+  const home = join(userHome, '.cc-rsi')
+  const proj = join(userHome, 'proj')
+  mkdirSync(join(home, 'projects', 'k', 'sessions', 's1'), { recursive: true })
+  mkdirSync(join(proj, 'src'), { recursive: true })
+  symlinkSync(userHome, join(proj, 'uhlink'))
+  const opts = (cwd = proj, extra = {}) => ({ hidden: [home], allowedPaths: [], home, userHome, recursionGuard: false, cwd, ...extra })
+  return { base, userHome, home, proj, opts }
+}
+
+test('scanBash: globs and brace lists are expanded against hidden roots (security-6)', async () => {
+  const { userHome, home, proj, opts } = await homeLayout()
+  for (const command of [
+    'cat ~/.cc-r*/projects/*/sessions/*/task.json',
+    'cat ~/.cc-rs?/projects/k/sessions/s1/task.json',
+    'sed -i s/FAIL/PASS/ ~/.cc-r*/projects/*/sessions/*/task.json',
+    'cp /tmp/x ~/.cc-rs[i]/config.json',
+    'cat ~/.cc-{rsi,other}/config.json',
+    'cat ~/.c*/projects/k/x',
+    'ls ~/.*',
+    'echo x > ~/.cc-r*/config.json',
+    'cat uhlink/.cc-*/projects/k/x',
+    `cat ${userHome}/.cc-rs[!x]/x`,
+    'shopt -s dotglob; cat ~/*/projects/k/x',
+    'bash -c "cat ~/.cc-r*/x"',
+  ]) {
+    assert.equal(scanBash(command, opts()), hiddenReason(home), command)
+  }
+  // Plain spellings that cannot reach the hidden root stay allowed (bash: `*` and `**` skip dot names).
+  for (const command of ['ls *.py', 'cat ./src/*.js', 'ls ~/.*rc', 'cat ~/.bashrc', 'cat ~/*.txt', 'cat ~/**/x.txt', 'du -sh ~/*', 'mkdir -p {a,b}/c',
+    'echo {1..100}', 'ls /tmp/*.log', `cat ${userHome}/.cc-rs[^i]/x`, 'for f in src/*; do echo $f; done']) {
+    assert.equal(scanBash(command, opts()), null, command)
+  }
+  // An allowed path inside the hidden root stays usable through globs.
+  const view = join(home, 'projects', 'k', 'views')
+  assert.equal(scanBash('ls ~/.cc-rsi/projects/k/views/*', opts(proj, { allowedPaths: [view] })), null)
+  // A glob whose expansions are an ancestor of a hidden root matters only to commands that walk trees.
+  assert.equal(scanBash(`ls -d ${proj.slice(0, -1)}*`, opts()), null)
+  assert.equal(scanBash(`du -sh ${userHome}*`, opts()), hiddenReason(home))
+})
+
+test('scanBash: commands that walk directory trees may not start above a hidden root (security-6)', async () => {
+  const { userHome, home, proj, opts } = await homeLayout()
+  const denied = [
+    [proj, 'grep -rn VERDICT ~'],
+    [proj, `grep -rn VERDICT ${userHome}`],
+    [proj, 'find ~ -name task.json'],
+    [proj, 'find -L ~ -name task.json'],
+    [proj, 'cd .. && grep -r VERDICT .'],
+    [proj, 'ls -R ~'],
+    [proj, 'grep -r --include=*.json VERDICT ..'],
+    [proj, 'grep -d recurse VERDICT ~'],
+    [proj, 'rsync -a ~/ /tmp/backup'],
+    [proj, 'cp -r ~ /tmp/copy'],
+    [proj, 'mv ~ /tmp/elsewhere'],
+    [proj, 'rm -rf ..'],
+    [proj, 'chmod -R 777 ~'],
+    [proj, 'zip -r /tmp/z.zip ..'],
+    [proj, 'tar czf /tmp/x.tgz -C ~ .'],
+    [proj, 'diff -r ~ /tmp/y'],
+    [proj, 'du -sh ~'],
+    [proj, 'tree ~'],
+    [proj, 'fd task ~'],
+    [proj, 'find / -name x 2>/dev/null'],
+    [proj, 'grep -r x $PWD/..'],
+    [proj, 'cd ~ && rg VERDICT'],
+    [proj, 'bash -c "grep -r x ~"'],
+    [proj, 'eval "find ~ -name x"'],
+    [proj, 'grep -r x uhlink'],
+    [proj, `ls -R ${userHome.slice(0, -1)}*`],
+    // Started in the user home: the cwd itself is walked.
+    [userHome, 'grep -r foo .'],
+    [userHome, 'grep -r -e VERDICT'],
+    [userHome, 'grep -rn VERDICT 2>/dev/null'],
+    [userHome, 'rg VERDICT'],
+    [userHome, 'find -name task.json'],
+    [userHome, 'du -sh 2>/dev/null'],
+    [userHome, 'ls -R'],
+  ]
+  for (const [cwd, command] of denied) assert.equal(scanBash(command, opts(cwd)), hiddenReason(home), `${command} (cwd ${cwd === proj ? 'project' : 'home'})`)
+  const allowed = ['grep -r foo src', 'grep -rn "TODO" . --include=*.py', 'find . -name x', 'find src -name "*.py" -exec grep -l x {} +', 'ls -la ..', 'ls ~', 'cp -r src ~',
+    'cp ~/.bashrc .', 'grep foo ~/notes.txt', 'rm -rf build', 'rsync -av src/ /tmp/dst/', 'tar czf /tmp/p.tgz -C ~ proj', 'rg x src 2>&1 | head', 'git grep -n x',
+    'du -sh .', 'ls -R src', 'find . -type f -name "*.log" -delete', 'grep -r . src', 'rm -rf ./* ./.[!.]* 2>/dev/null; true']
+  for (const command of allowed) assert.equal(scanBash(command, opts()), null, command)
+  // The caller chooses the reason (the role guard uses the Grep/Glob search-root reason).
+  assert.equal(scanBash('grep -rn VERDICT ~', opts(proj, { coversReason: path => coversHiddenReason(path) })), coversHiddenReason(userHome))
+  assert.match(coversHiddenReason('/x'), /^\/x contains a harness-private path hidden from this role; narrow the search path/)
+  // A store root without a leading dot is reached by `*` too.
+  const store = join(userHome, 'store')
+  mkdirSync(store)
+  assert.equal(scanBash('du -sh ~/*', opts(proj, { hidden: [store] })), hiddenReason(store))
+  assert.equal(scanBash('ls ~/*', opts(proj, { hidden: [store] })), hiddenReason(store), 'ls of a dir lists the hidden root itself')
+  assert.equal(scanBash('ls ~/p*', opts(proj, { hidden: [store] })), null)
+})
+
+test('commandWords: redirections and descriptor numbers are not command words', () => {
+  assert.deepEqual(commandWords('>out claude -p x')[0], { word: 'claude', args: ['out', '-p', 'x'] })
+  assert.deepEqual(commandWords('make 2>&1 | tee log').map(w => w.word), ['make', 'tee'])
+  assert.deepEqual(commandWords('cat <<EOF\nx\nEOF')[0], { word: 'cat', args: ['EOF'] })
+  assert.deepEqual(commandWords('ls &>> log x')[0], { word: 'ls', args: ['log', 'x'] })
 })
 
 test('scanBash: bashDeny patterns, invalid patterns fail closed', () => {

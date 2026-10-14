@@ -6,10 +6,12 @@
 //
 // Usage: node scripts/run-tests.mjs [path…] [--node-flag…]
 //   path    a test file or a directory to collect from (default: test/); relative to the repository
-//   --flag  passed to node before --test (e.g. --test-reporter=spec on Node >= 19)
+//   --flag  passed to node before --test (e.g. --test-reporter=spec on Node >= 19). Node flags that
+//           take a value accept both `--flag=value` and `--flag value` (e.g. --test-name-pattern X);
+//           any other flag takes its value only in the `--flag=value` form.
 
 import { spawn } from 'node:child_process'
-import { readdirSync, statSync } from 'node:fs'
+import { readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,9 +39,32 @@ function isUnder(child, parent) {
   return child === parent || child.startsWith(parent + sep)
 }
 
+/** Node options that take a separate value (`--flag value`); the token after them is not a path. */
+const VALUE_FLAGS = new Set([
+  '--test-name-pattern', '--test-skip-pattern', '--test-reporter', '--test-reporter-destination', '--test-concurrency',
+  '--test-timeout', '--test-shard', '--test-coverage-include', '--test-coverage-exclude', '--test-coverage-branches',
+  '--test-coverage-functions', '--test-coverage-lines', '--test-isolation', '--import', '--require', '-r', '--loader',
+  '--experimental-loader', '--conditions', '-C', '--env-file',
+])
+
+/** `{ flags, paths }` of the runner's arguments (portability-13: `--flag value` keeps its value). */
+export function splitArgs(argv) {
+  const flags = []
+  const paths = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (!arg.startsWith('-')) {
+      paths.push(arg)
+      continue
+    }
+    flags.push(arg)
+    if (!arg.includes('=') && VALUE_FLAGS.has(arg) && i + 1 < argv.length) flags.push(argv[++i])
+  }
+  return { flags, paths }
+}
+
 function main(argv) {
-  const flags = argv.filter(arg => arg.startsWith('-'))
-  const paths = argv.filter(arg => !arg.startsWith('-'))
+  const { flags, paths } = splitArgs(argv)
   const e2e = process.env.CC_RSI_E2E === '1'
   const targets = paths.length > 0 ? paths.map(p => resolve(ROOT, p)) : [join(ROOT, 'test')]
   const files = []
@@ -81,6 +106,17 @@ function main(argv) {
   })
 }
 
-main(process.argv.slice(2)).then(code => {
-  process.exitCode = code
-})
+/** Whether this file is the program being run (not imported by a test). */
+function isMain() {
+  try {
+    return typeof process.argv[1] === 'string' && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (isMain()) {
+  main(process.argv.slice(2)).then(code => {
+    process.exitCode = code
+  })
+}

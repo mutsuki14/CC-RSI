@@ -95,15 +95,15 @@ describe('skills', () => {
     }
   })
 
-  it('status, explore and memory are verbatim (SPEC §13.3)', () => {
+  it('status, explore and memory are verbatim (SPEC §13.3, with --report-exit: cc-integration-4)', () => {
     assert.equal(skill('status').text, `---
 name: status
 description: Show cc-rsi state for this project — memory size and integrity, frozen/sealed flags, the current task's independent-verification state, and running or paused exploration lineages. Never shows sealed evaluation scores.
 allowed-tools: Bash(node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" status *)
 ---
-!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" status --session \${CLAUDE_SESSION_ID}\`
+!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" status --report-exit --session \${CLAUDE_SESSION_ID}\`
 
-Summarise the status above for the user in a few short lines. Do not run further commands.
+Summarise the status above for the user in a few short lines (the last line \`[cc-rsi exit N]\` is the exit status; non-zero means the status could not be read). Do not run further commands.
 `)
     assert.equal(skill('explore').text, `---
 name: explore
@@ -112,9 +112,9 @@ argument-hint: "preflight|start|status|log|stop|resume|show|list … (e.g. start
 disable-model-invocation: true
 allowed-tools: Bash(node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore *)
 ---
-!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore $ARGUMENTS --session \${CLAUDE_SESSION_ID}\`
+!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore --report-exit $ARGUMENTS --session \${CLAUDE_SESSION_ID}\`
 
-Report the output above to the user faithfully. If it is a preflight, tell the user to re-run with --yes to launch. Do not poll; the user can run /cc-rsi:explore status later.
+Report the output above to the user faithfully. Its last line \`[cc-rsi exit N]\` is the exit status: 0 ok, 1 error, 2 usage, 3 refused by the BLOCKERS listed (explain how to resolve each), 65 human-only (the user must run it in a terminal). If it is a preflight without blockers, tell the user to re-run with --yes to launch. Do not poll; the user can run /cc-rsi:explore status later.
 `)
     assert.equal(skill('memory').text, `---
 name: memory
@@ -123,15 +123,16 @@ argument-hint: "show [path] | inventory | history | verify"
 disable-model-invocation: true
 allowed-tools: Bash(node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" memory *)
 ---
-!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" memory $ARGUMENTS\`
+!\`node "\${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" memory --report-exit $ARGUMENTS\`
 
-Relay the output to the user.
+Relay the output to the user. Its last line \`[cc-rsi exit N]\` is the exit status: 0 ok, 1 error (for verify: tampered memory, see the remedy above), 2 usage, 3 refused, 65 human-only (the user must run it in a terminal).
 `)
     const freeze = skill('freeze')
-    assert.match(freeze.body, /^!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/cc-rsi" memory freeze`\n\nTell the user memory is now frozen \(Phase-3 reuse\); unfreezing is human-only: run `cc-rsi memory unfreeze` in a terminal\.\n$/)
+    assert.equal(freeze.frontmatter['allowed-tools'], 'Bash(node "${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" memory freeze --report-exit)')
+    assert.match(freeze.body, /^!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/cc-rsi" memory freeze --report-exit`\n\nThe last line `\[cc-rsi exit N\]` is the exit status\. On exit 0 tell the user memory is now frozen \(Phase-3 reuse\); unfreezing is human-only: run `cc-rsi memory unfreeze` in a terminal\. Otherwise memory was not frozen: relay the reason above\.\n$/)
     const doctor = skill('doctor')
     assert.equal(doctor.frontmatter['argument-hint'], '[--live]')
-    assert.match(doctor.body, /^!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/cc-rsi" doctor \$ARGUMENTS --session \$\{CLAUDE_SESSION_ID\}`\n\nExplain each FAIL\/WARN and its remedy\.\n$/)
+    assert.match(doctor.body, /^!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/cc-rsi" doctor --report-exit \$ARGUMENTS --session \$\{CLAUDE_SESSION_ID\}`\n\nThe last line `\[cc-rsi exit N\]` is the command's exit status \(0: no check failed; 1: at least one FAIL\)\. Explain each FAIL\/WARN and its remedy\.\n$/)
   })
 })
 

@@ -7,11 +7,11 @@ discarded and cannot update durable memory; edits to this directory are discarde
 The complete file inventory is below.
 The inventory is populated.
 First understand the task, then inspect memory as you judge useful: you may list,
-search across, preview, re-read, or fully read files in any order, with Read, Grep,
-Glob or Bash. Read a file as deeply as needed before relying on it. If new evidence
-changes your understanding, you become stalled, or earlier context is compressed,
-reconsider both previously useful and unread memory. You decide what to retrieve
-and how to use it.]
+search across, preview, re-read, or fully read files in any order, with your file
+tools or shell commands. Read a file as deeply as needed before relying on it. If
+new evidence changes your understanding, you become stalled, or earlier context is
+compressed, reconsider both previously useful and unread memory. You decide what to
+retrieve and how to use it.]
 
 Current durable-memory inventory (5 files):
   2140  notes/csv-quoting.md
@@ -48,14 +48,13 @@ The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep
 inputs, editable project state, required project-local dependencies, and final
 deliverables inside that root and leave it nonempty. Put disposable application
 extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
-outside it (for example in a temporary directory such as /tmp), and remove any such
-debugging debris you accidentally created inside the root before your terminal
-handoff. Do not remove supplied inputs or anything required to replay the submitted
-project. Never create symbolic links or special files inside the root. The harness
-snapshots only this root; it does not judge the contents. During project work,
-/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only experience: edits to your memory directory
-during work are discarded. Only the later terminal memory-distillation phase can
-promote memory.
+outside it (for example in a temporary directory such as /tmp, which your shell commands can use but your file tools may not reach), and remove any such debugging debris you accidentally
+created inside the root before your terminal handoff. Do not remove supplied inputs
+or anything required to replay the submitted project. Never create symbolic links or
+special files inside the root. The harness snapshots only this root; it does not
+judge the contents. During project work, /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only
+experience: edits to your memory directory during work are discarded. Only the later
+terminal memory-distillation phase can promote memory.
 ===== deep-empty =====
 [YOUR MEMORY — notes from your own prior practice in this environment.
 They may be wrong, outdated, or inapplicable to this task: treat them as hints
@@ -65,11 +64,11 @@ discarded and cannot update durable memory; edits to this directory are discarde
 The complete file inventory is below.
 There is no prior durable memory to retrieve in this attempt.
 First understand the task, then inspect memory as you judge useful: you may list,
-search across, preview, re-read, or fully read files in any order, with Read, Grep,
-Glob or Bash. Read a file as deeply as needed before relying on it. If new evidence
-changes your understanding, you become stalled, or earlier context is compressed,
-reconsider both previously useful and unread memory. You decide what to retrieve
-and how to use it.]
+search across, preview, re-read, or fully read files in any order, with your file
+tools or shell commands. Read a file as deeply as needed before relying on it. If
+new evidence changes your understanding, you become stalled, or earlier context is
+compressed, reconsider both previously useful and unread memory. You decide what to
+retrieve and how to use it.]
 
 Current durable-memory inventory: empty (0 files).
 
@@ -103,14 +102,13 @@ The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep
 inputs, editable project state, required project-local dependencies, and final
 deliverables inside that root and leave it nonempty. Put disposable application
 extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
-outside it (for example in a temporary directory such as /tmp), and remove any such
-debugging debris you accidentally created inside the root before your terminal
-handoff. Do not remove supplied inputs or anything required to replay the submitted
-project. Never create symbolic links or special files inside the root. The harness
-snapshots only this root; it does not judge the contents. During project work,
-/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only experience: edits to your memory directory
-during work are discarded. Only the later terminal memory-distillation phase can
-promote memory.
+outside it (for example in a temporary directory such as /tmp, which your shell commands can use but your file tools may not reach), and remove any such debugging debris you accidentally
+created inside the root before your terminal handoff. Do not remove supplied inputs
+or anything required to replay the submitted project. Never create symbolic links or
+special files inside the root. The harness snapshots only this root; it does not
+judge the contents. During project work, /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only
+experience: edits to your memory directory during work are discarded. Only the later
+terminal memory-distillation phase can promote memory.
 ===== frozen =====
 [YOUR MEMORY — notes from your own prior practice in this environment.
 They may be wrong, outdated, or inapplicable to this task: treat them as hints
@@ -120,11 +118,11 @@ discarded and cannot update durable memory; edits to this directory are discarde
 The complete file inventory is below.
 The inventory is populated.
 First understand the task, then inspect memory as you judge useful: you may list,
-search across, preview, re-read, or fully read files in any order, with Read, Grep,
-Glob or Bash. Read a file as deeply as needed before relying on it. If new evidence
-changes your understanding, you become stalled, or earlier context is compressed,
-reconsider both previously useful and unread memory. You decide what to retrieve
-and how to use it.]
+search across, preview, re-read, or fully read files in any order, with your file
+tools or shell commands. Read a file as deeply as needed before relying on it. If
+new evidence changes your understanding, you become stalled, or earlier context is
+compressed, reconsider both previously useful and unread memory. You decide what to
+retrieve and how to use it.]
 
 Current durable-memory inventory (5 files):
   2140  notes/csv-quoting.md
@@ -152,8 +150,105 @@ not complete, this same context receives its report and repairs.
 RUNTIME BOUNDARY:
 Keep supplied inputs, editable project state, required project-local dependencies,
 and final deliverables inside /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001, and leave it nonempty. Put
-disposable caches, probes, and scratch artifacts outside it (for example in a
-temporary directory such as /tmp), and remove any debugging debris you accidentally
-created inside the root before your handoff. Never create symbolic links or special
-files inside the root. Durable memory is frozen: it is read-only, and edits to your
-memory directory are discarded.
+disposable caches, probes, and scratch artifacts outside it
+(for example in a temporary directory such as /tmp, which your shell commands can use but your file tools may not reach), and remove any debugging debris you accidentally created inside the
+root before your handoff. Never create symbolic links or special files inside the
+root. Durable memory is frozen: it is read-only, and edits to your memory directory
+are discarded.
+===== deep-scratch =====
+[YOUR MEMORY — notes from your own prior practice in this environment.
+They may be wrong, outdated, or inapplicable to this task: treat them as hints
+and verify against the live environment. They are available under /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory
+from the durable host snapshot: any local work-phase edits are
+discarded and cannot update durable memory; edits to this directory are discarded.
+The complete file inventory is below.
+There is no prior durable memory to retrieve in this attempt.
+First understand the task, then inspect memory as you judge useful: you may list,
+search across, preview, re-read, or fully read files in any order, with your file
+tools or shell commands. Read a file as deeply as needed before relying on it. If
+new evidence changes your understanding, you become stalled, or earlier context is
+compressed, reconsider both previously useful and unread memory. You decide what to
+retrieve and how to use it.]
+
+Current durable-memory inventory: empty (0 files).
+
+TASK:
+Make `make test` pass.
+
+PROJECT ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+
+You are a fresh Actor Agent context at a fresh session in the project root where this
+task must be done. Nothing has been examined yet. You have not been given an
+evaluator, score, hidden grading material, worked solution, or a prior target
+trajectory. Make one complete attempt using your own judgment: you choose the
+strategy, investigation, amount of work, and when your best candidate is ready. Its
+purpose is to expose the current capability frontier honestly, not to look
+successful.
+
+When you decide to stop target work, end your turn with one complete lossless
+handoff as your final message. Put the line STATUS: SUBMIT on a line of its own
+(outside any code block), then freely record what you delivered, where relevant
+artifacts are, what changed, and any uncertainty or unresolved state the Verifier
+Agent should investigate. SUBMIT is neutral: it claims neither success nor failure
+and applies equally to complete, partial, or blocked work.
+
+Do not update durable memory during target work. After the independent verdict,
+this same Actor Agent context may receive the complete Verifier report and learn
+from it. There is no prescribed turn count. End your turn with the handoff only
+after it represents the candidate you choose to submit.
+
+GENERIC RUNTIME OWNERSHIP BOUNDARY:
+The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001. Keep supplied project
+inputs, editable project state, required project-local dependencies, and final
+deliverables inside that root and leave it nonempty. Put disposable application
+extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
+outside it (in your private scratch directory /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/scratch, which your file tools and shell commands can both use and which is never part of the project), and remove any such debugging debris you accidentally
+created inside the root before your terminal handoff. Do not remove supplied inputs
+or anything required to replay the submitted project. Never create symbolic links or
+special files inside the root. The harness snapshots only this root; it does not
+judge the contents. During project work, /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory is canonical read-only
+experience: edits to your memory directory during work are discarded. Only the later
+terminal memory-distillation phase can promote memory.
+===== frozen-scratch =====
+[YOUR MEMORY — notes from your own prior practice in this environment.
+They may be wrong, outdated, or inapplicable to this task: treat them as hints
+and verify against the live environment. They are available under /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/memory
+from the durable host snapshot: any local work-phase edits are
+discarded and cannot update durable memory; edits to this directory are discarded.
+The complete file inventory is below.
+There is no prior durable memory to retrieve in this attempt.
+First understand the task, then inspect memory as you judge useful: you may list,
+search across, preview, re-read, or fully read files in any order, with your file
+tools or shell commands. Read a file as deeply as needed before relying on it. If
+new evidence changes your understanding, you become stalled, or earlier context is
+compressed, reconsider both previously useful and unread memory. You decide what to
+retrieve and how to use it.]
+
+Current durable-memory inventory: empty (0 files).
+
+TASK:
+Make `make test` pass.
+
+PROJECT ROOT: /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001
+
+You are at a fresh session in the project root where this task must be done.
+Nothing has been examined yet. Decide how much work the task requires; you choose
+the strategy, investigation, amount of work, and when your candidate is ready.
+
+When you judge the task's end state ready, end your turn with one complete lossless
+handoff as your final message. Put the line STATUS: SUBMIT on a line of its own
+(outside any code block), then freely record what you delivered, where relevant
+artifacts are, what changed, and any uncertainty or unresolved state. SUBMIT is
+neutral: it claims neither success nor failure and applies equally to complete,
+partial, or blocked work. An independent Verifier Agent then inspects the project
+root without seeing your reasoning; if it finds concrete evidence that the task is
+not complete, this same context receives its report and repairs.
+
+RUNTIME BOUNDARY:
+Keep supplied inputs, editable project state, required project-local dependencies,
+and final deliverables inside /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/t001, and leave it nonempty. Put
+disposable caches, probes, and scratch artifacts outside it
+(in your private scratch directory /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/t001/scratch, which your file tools and shell commands can both use and which is never part of the project), and remove any debugging debris you accidentally created inside the
+root before your handoff. Never create symbolic links or special files inside the
+root. Durable memory is frozen: it is read-only, and edits to your memory directory
+are discarded.

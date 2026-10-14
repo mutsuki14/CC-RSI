@@ -46,15 +46,6 @@ VERDICT: FAIL
 
 ACTOR LEARNING DIAGNOSIS (verbatim):
 The quoting rule is the gap.
-
-MEMORY CHANGES:
-{
-  "created": [],
-  "deleted": [],
-  "modified": [
-    "notes/a.md"
-  ]
-}
 ===== phase2-evidence-rounds =====
 PRACTICE PROJECT
 

@@ -5,6 +5,6 @@ argument-hint: "preflight|start|status|log|stop|resume|show|list … (e.g. start
 disable-model-invocation: true
 allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore *)
 ---
-!`node "${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore $ARGUMENTS --session ${CLAUDE_SESSION_ID}`
+!`node "${CLAUDE_PLUGIN_ROOT}/bin/cc-rsi" explore --report-exit $ARGUMENTS --session ${CLAUDE_SESSION_ID}`
 
-Report the output above to the user faithfully. If it is a preflight, tell the user to re-run with --yes to launch. Do not poll; the user can run /cc-rsi:explore status later.
+Report the output above to the user faithfully. Its last line `[cc-rsi exit N]` is the exit status: 0 ok, 1 error, 2 usage, 3 refused by the BLOCKERS listed (explain how to resolve each), 65 human-only (the user must run it in a terminal). If it is a preflight without blockers, tell the user to re-run with --yes to launch. Do not poll; the user can run /cc-rsi:explore status later.

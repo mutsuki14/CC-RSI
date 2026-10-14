@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  fail, normalizeTokenLine, ok, parseDecision, parseSubmit, parseUniqueToken, parseVerdict, proseLines,
+  fail, isSyntaxDetail, normalizeTokenLine, ok, parseDecision, parseSubmit, parseUniqueToken, parseVerdict, proseLines,
 } from '../../lib/protocol/tokens.mjs'
 
 const verdict = (text, allowUnverified = false) => {
@@ -66,9 +66,59 @@ test('tolerates one layer of emphasis or inline code', () => {
   assert.equal(verdict('`VERDICT: PASS`'), 'PASS')
   assert.equal(verdict('  **VERDICT: PASS**  '), 'PASS')
   assert.equal(verdict('***VERDICT: PASS***'), undefined)
-  assert.equal(verdict('**VERDICT:** PASS'), undefined)
   assert.equal(normalizeTokenLine(' ** VERDICT: PASS ** '), 'VERDICT: PASS')
   assert.equal(normalizeTokenLine('**'), '**')
+})
+
+test('tolerates a heading marker, a bold label or value and one trailing period (prompts-4)', () => {
+  // Markdown forms a Verifier, Actor or Curriculum commonly writes for its token line.
+  assert.equal(verdict('**VERDICT:** PASS'), 'PASS')
+  assert.equal(verdict('**VERDICT**: FAIL'), 'FAIL')
+  assert.equal(verdict('__VERDICT__: FAIL'), 'FAIL')
+  assert.equal(verdict('*Verdict:* fail'), 'FAIL')
+  assert.equal(verdict('## VERDICT: PASS'), 'PASS')
+  assert.equal(verdict('### VERDICT: FAIL ###'), 'FAIL')
+  assert.equal(verdict('VERDICT: **PASS**'), 'PASS')
+  assert.equal(verdict('VERDICT: `FAIL`'), 'FAIL')
+  assert.equal(verdict('VERDICT: PASS.'), 'PASS')
+  assert.equal(verdict('**VERDICT: PASS.**'), 'PASS')
+  assert.equal(verdict('**VERDICT: PASS**.'), 'PASS')
+  assert.equal(verdict('## **VERDICT:** FAIL.'), 'FAIL')
+  assert.equal(verdict('VERDICT: PASS..'), undefined)
+  assert.equal(verdict('VERDICT: PASS!'), undefined)
+  assert.equal(verdict('#VERDICT: PASS'), undefined)
+  assert.equal(parseSubmit('**STATUS:** SUBMIT\nwork').value.body, 'work')
+  assert.equal(parseSubmit('## STATUS: SUBMIT').ok, true)
+  assert.deepEqual(parseDecision('### DECISION: PROJECT\nIn <PROJECT_ROOT> do x.', ['PROJECT']).value,
+    { decision: 'PROJECT', body: 'In <PROJECT_ROOT> do x.', rationale: '' })
+  assert.equal(parseDecision('DECISION: STALLED.', ['STALLED']).value.decision, 'STALLED')
+  assert.equal(parseDecision('**DECISION:** READY_FOR_TARGET', ['READY_FOR_TARGET']).value.decision, 'READY_FOR_TARGET')
+  // A heading or bold token still conflicts with a differing plain one.
+  assert.equal(parseVerdict('## VERDICT: PASS\nVERDICT: FAIL').detail, 'your reply contained conflicting VERDICT lines (PASS, FAIL)')
+})
+
+test('a list, quoted, fenced or over-decorated token line is named in the detail and is a syntax problem (prompts-4)', () => {
+  const base = 'your reply had no standalone line "VERDICT: …" outside code fences'
+  const detail = text => parseVerdict(text, { allowUnverified: true }).detail
+  assert.equal(detail('Report.\n- VERDICT: PASS'), `${base}; the line "- VERDICT: PASS" is a list item, so it does not count`)
+  assert.equal(detail('1. **VERDICT:** FAIL'), `${base}; the line "1. **VERDICT:** FAIL" is a list item, so it does not count`)
+  assert.equal(detail('> VERDICT: PASS'), `${base}; the line "> VERDICT: PASS" is a quotation, so it does not count`)
+  assert.equal(detail('Report.\n```\nVERDICT: FAIL\n```'), `${base}; the line "VERDICT: FAIL" is inside a code block, so it does not count`)
+  assert.equal(detail('    VERDICT: UNVERIFIED'), `${base}; the line "VERDICT: UNVERIFIED" is inside a code block, so it does not count`)
+  assert.equal(detail('***VERDICT: PASS***'), `${base}; the line "***VERDICT: PASS***" carries Markdown decoration, so it does not count`)
+  assert.equal(detail('No decision yet; I will check the parser next.'), base)
+  assert.equal(parseSubmit('- STATUS: SUBMIT\nwork').detail,
+    'your final message had no standalone line "STATUS: SUBMIT" outside code fences; the line "- STATUS: SUBMIT" is a list item, so it does not count')
+  assert.equal(parseDecision('- DECISION: READY_FOR_TARGET', ['READY_FOR_TARGET']).detail,
+    'your reply had no standalone line "DECISION: …" outside code fences; the line "- DECISION: READY_FOR_TARGET" is a list item, so it does not count')
+  for (const text of ['- VERDICT: PASS', '> VERDICT: PASS', '```\nVERDICT: PASS\n```', '***VERDICT: PASS***', 'VERDICT: PASS\nVERDICT: FAIL']) {
+    assert.equal(isSyntaxDetail(detail(text)), true, text)
+  }
+  for (const text of ['no verdict here', 'VERDICT: UNVERIFIED']) {
+    assert.equal(isSyntaxDetail(parseVerdict(text, { allowUnverified: false }).detail), false, text)
+  }
+  assert.equal(isSyntaxDetail(undefined), false)
+  assert.equal(isSyntaxDetail('it did not contain exactly one standalone VERDICT line'), false)
 })
 
 test('blockquote lines are kept as prose but never carry a token', () => {
@@ -91,7 +141,6 @@ test('identical repeats are fine; conflicting values are invalid; inline tokens 
   assert.equal(conflict.detail, 'your reply contained conflicting VERDICT lines (PASS, FAIL)')
   assert.equal(verdict('no verdict here'), undefined)
   assert.equal(verdict('The VERDICT: PASS is inline'), undefined)
-  assert.equal(verdict('VERDICT: PASS.'), undefined)
 })
 
 test('UNVERIFIED only when allowed, with a precise detail', () => {
@@ -126,7 +175,8 @@ test('parseSubmit: STATUS anywhere in prose; body without the token lines', () =
   assert.equal(repeated.value.body, 'work')
   const fenced = parseSubmit('```\nSTATUS: SUBMIT\n```\nI am finished.')
   assert.equal(fenced.ok, false)
-  assert.equal(fenced.detail, 'your final message had no standalone line "STATUS: SUBMIT" outside code fences')
+  assert.equal(fenced.detail, 'your final message had no standalone line "STATUS: SUBMIT" outside code fences; the line "STATUS: SUBMIT" is inside a code block, so it does not count')
+  assert.equal(parseSubmit('I am finished.').detail, 'your final message had no standalone line "STATUS: SUBMIT" outside code fences')
   assert.equal(parseSubmit('status: submit').ok, true)
   assert.equal(parseSubmit('STATUS: DONE').ok, false)
 })

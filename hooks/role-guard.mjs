@@ -18,7 +18,7 @@ import { readFileSync, writeSync } from 'node:fs'
 import { readJsonSafeSync, writeJsonAtomicSync } from '../lib/core/atomic.mjs'
 import { sha256Hex } from '../lib/core/digest.mjs'
 import { appendJsonlSync } from '../lib/core/jsonl.mjs'
-import { hiddenReason, scanBash } from '../lib/guard/bash.mjs'
+import { coversHiddenReason, hiddenReason, scanBash } from '../lib/guard/bash.mjs'
 import { canonicalRoot, isFileTool, isUnder, searchCoversHidden, toolPathArgs } from '../lib/guard/paths.mjs'
 
 const PIN_LIMIT = 9000
@@ -140,9 +140,7 @@ function toolDecision(policy, payload) {
     for (const p of paths) {
       // A role's own directories stay usable even when a broader hidden root contains them (PF §6.2).
       if (underAny(p, hidden) && !underAny(p, own)) return hiddenReason(p)
-      if (search && searchCoversHidden(p, hidden) !== null) {
-        return `${p} contains a harness-private path hidden from this role; narrow the search path (hidden paths are not candidate evidence).`
-      }
+      if (search && searchCoversHidden(p, hidden) !== null) return coversHiddenReason(p)
       if (!underAny(p, readRoots)) return `${p} is outside the directories available to this role.`
       if (write && (!underAny(p, writeRoots) || underAny(p, readOnly))) return `${p} is not writable by this role.`
     }
@@ -158,6 +156,8 @@ function toolDecision(policy, payload) {
       recursionGuard: policy.recursionGuard !== false,
       bashDeny: policy.bashDeny,
       cwd,
+      // A recursive command rooted above a hidden root gets the same reason as a Grep/Glob search (security-6).
+      coversReason: path => coversHiddenReason(path),
     })
   }
   return null

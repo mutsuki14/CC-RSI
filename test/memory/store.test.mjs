@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { hostname } from 'node:os'
 import {
-  lstat, mkdir, readdir, readFile, rename, rm, stat, symlink, utimes, writeFile,
+  appendFile, lstat, mkdir, readdir, readFile, rename, rm, stat, symlink, utimes, writeFile,
 } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -17,7 +17,7 @@ import {
   MemoryQuarantineError, MemorySealedError, MemoryTamperError, UnsafeMemoryPathError,
 } from '../../lib/memory/errors.mjs'
 import { EMPTY_TREE_SHA256 } from '../../lib/memory/hash.mjs'
-import { MemoryStore } from '../../lib/memory/store.mjs'
+import { MemoryStore, storeIntegrity } from '../../lib/memory/store.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 
@@ -107,12 +107,18 @@ describe('MemoryStore', () => {
     const record = await store.commit('b', { kind: 'practice', outcome: 'PASS' })
     assert.deepEqual(record.created, ['y.md'])
     await assert.rejects(lstat(prevDir), /ENOENT/)
-    // A second rebase replaces an older .prev.
+    // A second rebase before the Actor changed anything (e.g. a re-run after a crash) keeps .prev.
     const c = await store.openDraft('c')
     await put(c.dir, 'z.md', 'old')
     await store.rebaseDraft('c')
     const again = await store.rebaseDraft('c')
-    assert.deepEqual((await readdir(again.prevDir)).sort(), ['x.md', 'y.md'])
+    assert.deepEqual((await readdir(again.prevDir)).sort(), ['x.md', 'y.md', 'z.md'])
+    assert.equal(again.draft.baseHash, await store.treeHash())
+    // A rebase of a changed draft replaces the older .prev.
+    await put(again.draft.dir, 'w.md', 'new work')
+    const third = await store.rebaseDraft('c')
+    assert.deepEqual((await readdir(third.prevDir)).sort(), ['w.md', 'x.md', 'y.md'])
+    assert.deepEqual((await readdir(third.draft.dir)).sort(), ['x.md', 'y.md'])
     await assert.rejects(store.rebaseDraft('nope'), MemoryDraftMissingError)
   })
 
@@ -254,6 +260,30 @@ describe('MemoryStore', () => {
     await put(relearn.dir, 'lesson.md', 'promoted twice?')
     assert.deepEqual(await restarted.commit('task-s-3', { kind: 'task', outcome: 'PASS' }), record)
     assert.equal((await restarted.journal()).length, 1)
+  })
+
+  it('integrity() is lock-free and treats an install in flight as intact (memory-crash-10)', async () => {
+    const { root, store } = await fresh({ keepHistory: true })
+    const record = await learn(store, 'ep-int', { 'a.md': 'one' })
+    assert.deepEqual(await store.integrity(), { expected: record.treeAfter, actual: record.treeAfter, intact: true, pending: false })
+    // Another process installed a tree and has not journaled it yet: its pending marker names it.
+    const draft = await store.openDraft('ep-int-2')
+    await put(draft.dir, 'b.md', 'two')
+    const next = await store.commit('ep-int-2', { kind: 'practice', outcome: 'PASS' })
+    const journal = await readFile(join(root, 'journal.jsonl'), 'utf8')
+    await writeFile(join(root, 'journal.jsonl'), `${journal.trim().split('\n')[0]}\n`)
+    await writeFile(join(root, 'commit.pending.json'), `${JSON.stringify({ v: 1, record: next })}\n`)
+    const inFlight = await storeIntegrity(root)
+    assert.equal(inFlight.intact, true)
+    assert.equal(inFlight.pending, true)
+    // Without the marker the same tree is a change outside a commit.
+    await rm(join(root, 'commit.pending.json'))
+    const t0 = Date.now()
+    const tampered = await storeIntegrity(root, { retryMs: 50 })
+    assert.equal(tampered.intact, false)
+    assert.equal(tampered.expected, record.treeAfter)
+    assert.equal(tampered.actual, next.treeAfter)
+    assert.ok(Date.now() - t0 >= 50, 'a mismatch is read once more before it is reported')
   })
 
   it('drops a pending commit whose install never happened (and a torn marker)', async () => {
@@ -548,6 +578,170 @@ describe('MemoryStore', () => {
     const record = await learn(store, 'py', { 'tool.py': 'print(1)', '__pycache__/tool.pyc': 'x', 'x.pyo': 'y' })
     assert.deepEqual(record.created, ['tool.py'])
     assert.deepEqual((await store.inventory()).files.map(f => f.path), ['tool.py'])
+  })
+
+  it('keeps a live owner\'s draft meta and .prev while its directory is momentarily missing (memory-crash-4)', async () => {
+    const { base, root, store } = await fresh()
+    const dir = join(base, 'work', 'memory')
+    const owner = { kind: 'engine', pid: process.pid, host: hostname(), lineage: 'l-1' }
+    const draft = await store.openDraft('ep', { dir, owner })
+    await put(dir, 'lesson.md', 'learned')
+    // A concurrent commit makes the draft conflict, so it is rebased with a .prev.
+    await learn(store, 'other', { 'x.md': 'x' })
+    await assert.rejects(store.commit('ep', { kind: 'practice', outcome: 'PASS' }), MemoryConflictError)
+    await store.rebaseDraft('ep')
+    await put(dir, 'lesson.md', 'learned')
+    // The Actor rebuilds its draft (mv aside, mv back) while another process opens the store.
+    await rename(dir, `${dir}.aside`)
+    const other = await MemoryStore.open(root, { limits })
+    assert.equal(await other.getDraft('ep'), undefined)
+    await assert.rejects(other.commit('ep', { kind: 'practice', outcome: 'PASS' }), MemoryDraftMissingError)
+    const listed = (await other.drafts()).find(d => d.episode === 'ep')
+    assert.deepEqual({ dirExists: listed.dirExists, live: listed.live }, { dirExists: false, live: true })
+    assert.ok((await stat(`${dir}.prev`)).isDirectory(), '.prev of a live owner is kept')
+    await rename(`${dir}.aside`, dir)
+    const record = await store.commit('ep', { kind: 'practice', outcome: 'PASS' })
+    assert.deepEqual(record.created, ['lesson.md'])
+    assert.equal(draft.dir, dir)
+    // A gone owner's meta is still swept, whatever its directory's state.
+    await store.openDraft('dead', { dir: join(base, 'work2', 'memory'), owner: { kind: 'engine', pid: DEAD_PID, host: hostname() } })
+    await rm(join(base, 'work2', 'memory'), { recursive: true })
+    await MemoryStore.open(root, { limits })
+    assert.equal((await store.drafts()).some(d => d.episode === 'dead'), false)
+  })
+
+  it('a rebase interrupted at any step is finished on resume and never loses the Actor\'s draft (memory-crash-5)', async () => {
+    // Each case leaves the on-disk state of a crash after one step of rebaseDraft.
+    const steps = ['intent', 'old-prev-removed', 'renamed', 'partial-copy', 'done']
+    for (const step of steps) {
+      for (const resume of ['rebaseDraft', 'openDraft']) {
+        const { base, root, store } = await fresh()
+        const dir = join(base, 'work', 'memory')
+        const owner = { kind: 'engine', pid: process.pid, host: hostname(), lineage: 'l-1' }
+        await store.openDraft('ep', { dir, owner })
+        await learn(store, 'other', { 'x.md': 'x' })
+        await mkdir(`${dir}.prev`, { recursive: true })
+        await put(`${dir}.prev`, 'older.md', 'an older previous draft')
+        await put(dir, 'lesson.md', 'the Actor\'s work')
+        await assert.rejects(store.commit('ep', { kind: 'practice', outcome: 'PASS' }), MemoryConflictError)
+        const metaPath = join(root, 'drafts', 'ep.json')
+        if (step === 'done') {
+          await store.rebaseDraft('ep')
+        } else {
+          const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+          const dirIno = String((await lstat(dir, { bigint: true })).ino)
+          await writeFile(metaPath, JSON.stringify({ ...meta, rebase: { prevDir: `${dir}.prev`, dirIno, keepPrev: false, at: '' } }))
+          if (step !== 'intent') await rm(`${dir}.prev`, { recursive: true })
+          if (step === 'renamed' || step === 'partial-copy') await rename(dir, `${dir}.prev`)
+          if (step === 'partial-copy') await put(dir, 'partial.md', 'half a copy')
+          // Mid-rebase there is no promotable draft; a commit reports a conflict and changes nothing.
+          assert.equal(await store.getDraft('ep'), undefined, step)
+          await assert.rejects(store.commit('ep', { kind: 'practice', outcome: 'PASS' }), MemoryConflictError)
+        }
+        // The resumed process (a fresh open sweeps first) finishes the rebase.
+        const resumed = await MemoryStore.open(root, { limits })
+        const draft = resume === 'rebaseDraft'
+          ? (await resumed.rebaseDraft('ep')).draft
+          : await resumed.openDraft('ep', { dir, owner })
+        const label = `${step} via ${resume}`
+        assert.equal(await readFile(join(`${dir}.prev`, 'lesson.md'), 'utf8'), 'the Actor\'s work', label)
+        assert.deepEqual((await readdir(dir)).sort(), ['x.md'], label)
+        assert.equal(draft.baseHash, await resumed.treeHash(), label)
+        assert.equal(JSON.parse(await readFile(metaPath, 'utf8')).rebase, undefined, label)
+        assert.ok(await resumed.getDraft('ep'), label)
+        // The Actor re-applies its work and the commit goes through.
+        await put(dir, 'lesson.md', 'the Actor\'s work')
+        assert.deepEqual((await resumed.commit('ep', { kind: 'practice', outcome: 'PASS' })).created, ['lesson.md'], label)
+      }
+    }
+  })
+
+  it('never accepts a change to frozen memory; restoring the frozen snapshot is the way back (memory-crash-8)', async () => {
+    const { root, store } = await fresh()
+    await learn(store, 'e1', { 'a.md': 'one' })
+    const r2 = await learn(store, 'e2', { 'a.md': 'two' })
+    const { treeHash } = await store.freeze({ by: 'test' })
+    assert.equal(treeHash, r2.treeAfter)
+    await writeFile(join(store.memoryDir, 'a.md'), 'edited by hand')
+    await assert.rejects(store.assertFrozenIntact(), MemoryFrozenTamperError)
+    await assert.rejects(store.acceptExternal({ by: 'human' }), err => {
+      assert.ok(err instanceof MemoryFrozenError)
+      assert.match(err.message, /cc-rsi memory restore 2/)
+      assert.equal(err.details.frozenSeq, 2)
+      return true
+    })
+    assert.equal((await store.journal()).length, 2, 'nothing was journaled')
+    // Only the snapshot of the frozen tree can be restored while frozen.
+    await assert.rejects(store.restoreHistory(1, { by: 'human' }), err => err instanceof MemoryFrozenError && /restore 2/.test(err.message))
+    const restored = await store.restoreHistory(2, { by: 'human' })
+    assert.equal(restored.kind, 'restore')
+    assert.equal(restored.treeAfter, treeHash)
+    await store.assertFrozenIntact()
+    await store.assertCanonicalIntact()
+    assert.ok(await store.frozen())
+    // A mutation journaled while frozen (before this fix): accepting the return to the frozen tree clears it.
+    await writeFile(join(store.memoryDir, 'a.md'), 'edited again')
+    const edited = await store.treeHash()
+    await appendFile(join(root, 'journal.jsonl'), `${JSON.stringify({ v: 1, seq: 4, episode: 'external-old', kind: 'external', treeBefore: treeHash, treeAfter: edited })}\n`)
+    await writeFile(join(store.memoryDir, 'a.md'), 'two')
+    await assert.rejects(store.assertCanonicalIntact(), MemoryTamperError)
+    const back = await store.acceptExternal({ by: 'human' })
+    assert.equal(back.treeAfter, treeHash)
+    await store.assertCanonicalIntact()
+    await store.assertFrozenIntact()
+    await store.unfreeze()
+  })
+
+  it('a stale store lock raced by several processes never yields two installs (memory-crash-1)', async () => {
+    const TRIALS = 12
+    const WORKERS = 3
+    const SLOT_MS = 300
+    const base = await tmpDir('cc-rsi-store-race-')
+    const old = new Date(Date.now() - 60_000)
+    const roots = []
+    for (let t = 0; t < TRIALS; t++) {
+      const root = join(base, `s${t}`)
+      const store = await MemoryStore.open(root, { limits, keepHistory: false })
+      for (let w = 0; w < WORKERS; w++) {
+        const draft = await store.openDraft(`ep-${w}`, { owner: { kind: 'session', sessionId: 'never-swept' } })
+        await put(draft.dir, `w${w}.md`, `lesson ${w}`)
+      }
+      // The store lock of a crashed holder: a gone pid, or an expired lease elsewhere.
+      await writeFile(join(root, '.lock'), JSON.stringify(t % 2 === 0
+        ? { pid: DEAD_PID, host: hostname(), token: 'dead:1', at: '' }
+        : { pid: 1, host: 'another-container', token: 'old:1', at: '' }))
+      if (t % 2 === 1) await utimes(join(root, '.lock'), old, old)
+      roots.push(root)
+    }
+    const worker = `
+      const { MemoryStore } = await import(${JSON.stringify(STORE_MODULE)})
+      const [episode, startAt, slot, ...roots] = process.argv.slice(1)
+      const sleep = ms => new Promise(r => setTimeout(r, ms))
+      const out = []
+      for (let t = 0; t < roots.length; t++) {
+        const at = Number(startAt) + t * Number(slot)
+        while (Date.now() < at) await sleep(Math.max(0, Math.min(5, at - Date.now() - 1)))
+        const store = new MemoryStore(roots[t], { keepHistory: false, lockOptions: { pollMs: 1, waitMs: 20000 } })
+        try { const r = await store.commit(episode, { kind: 'test' }); out.push('ok:' + r.seq) } catch (e) { out.push(e.code) }
+      }
+      console.log(JSON.stringify(out))`
+    const startAt = Date.now() + 1500
+    const runs = await Promise.all(Array.from({ length: WORKERS }, (_, w) => runNode('--input-type=module',
+      ['-e', worker, `ep-${w}`, String(startAt), String(SLOT_MS), ...roots], { timeoutMs: 90000 })))
+    for (const run of runs) assert.equal(run.code, 0, run.stderr)
+    const outcomes = runs.map(run => JSON.parse(run.stdout.trim()))
+    for (let t = 0; t < TRIALS; t++) {
+      const results = outcomes.map(list => list[t])
+      const store = new MemoryStore(roots[t], { keepHistory: false })
+      const journal = await store.journal()
+      const label = `trial ${t}: ${results.join(' ')}`
+      assert.equal(results.filter(r => r.startsWith('ok:')).length, 1, label)
+      assert.equal(results.filter(r => r === 'memory_conflict').length, WORKERS - 1, label)
+      assert.deepEqual(journal.map(r => r.seq), [1], label)
+      await store.assertCanonicalIntact()
+      const files = await readdir(store.memoryDir)
+      assert.deepEqual(files, [`w${journal[0].episode.slice(3)}.md`], label)
+    }
   })
 
   it('opens with every documented option and closes cleanly', async () => {

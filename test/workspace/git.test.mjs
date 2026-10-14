@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
-import { gitEnv, gitRepo, tmpDir } from '../_helpers/tmp.mjs'
+import { gitEnv, gitRepo, shq, tmpDir } from '../_helpers/tmp.mjs'
 import { Checkpoint } from '../../lib/workspace/checkpoint.mjs'
 import { baselineDelta, takeBaseline } from '../../lib/workspace/baseline.mjs'
 import {
@@ -70,18 +70,18 @@ async function exerciseAll(repo, scratch) {
 const PLANTS = [
   {
     name: 'core.fsmonitor',
-    setup: (repo, evil) => git(repo, 'config', 'core.fsmonitor', evil),
+    setup: (repo, evil) => git(repo, 'config', 'core.fsmonitor', shq(evil)),
     control: repo => plainGit(repo, 'status'),
   },
   {
     name: 'filter clean',
-    setup: async (repo, evil) => { git(repo, 'config', 'filter.x.clean', evil); await writeFile(join(repo, '.gitattributes'), '* filter=x\n') },
+    setup: async (repo, evil) => { git(repo, 'config', 'filter.x.clean', shq(evil)); await writeFile(join(repo, '.gitattributes'), '* filter=x\n') },
     control: repo => plainGit(repo, 'diff'),
   },
   {
     name: 'filter process (required)',
     setup: async (repo, evil) => {
-      git(repo, 'config', 'filter.x.process', evil)
+      git(repo, 'config', 'filter.x.process', shq(evil))
       git(repo, 'config', 'filter.x.required', 'true')
       await writeFile(join(repo, '.gitattributes'), '* filter=x\n')
     },
@@ -90,7 +90,7 @@ const PLANTS = [
   {
     name: 'filter smudge',
     setup: async (repo, evil) => {
-      git(repo, 'config', 'filter.x.smudge', evil)
+      git(repo, 'config', 'filter.x.smudge', shq(evil))
       await mkdir(join(repo, '.git', 'info'), { recursive: true })
       await writeFile(join(repo, '.git', 'info', 'attributes'), '* filter=x\n')
     },
@@ -102,22 +102,22 @@ const PLANTS = [
   },
   {
     name: 'diff driver command',
-    setup: async (repo, evil) => { git(repo, 'config', 'diff.y.command', evil); await writeFile(join(repo, '.gitattributes'), '* diff=y\n') },
+    setup: async (repo, evil) => { git(repo, 'config', 'diff.y.command', shq(evil)); await writeFile(join(repo, '.gitattributes'), '* diff=y\n') },
     control: repo => plainGit(repo, 'diff'),
   },
   {
     name: 'diff driver textconv',
-    setup: async (repo, evil) => { git(repo, 'config', 'diff.y.textconv', evil); await writeFile(join(repo, '.gitattributes'), '* diff=y\n') },
+    setup: async (repo, evil) => { git(repo, 'config', 'diff.y.textconv', shq(evil)); await writeFile(join(repo, '.gitattributes'), '* diff=y\n') },
     control: repo => plainGit(repo, 'diff', '--no-ext-diff'),
   },
   {
     name: 'diff.external',
-    setup: (repo, evil) => git(repo, 'config', 'diff.external', evil),
+    setup: (repo, evil) => git(repo, 'config', 'diff.external', shq(evil)),
     control: repo => plainGit(repo, 'diff'),
   },
   {
     name: 'GIT_EXTERNAL_DIFF in the caller environment',
-    setup: (repo, evil) => { process.env.GIT_EXTERNAL_DIFF = evil },
+    setup: (repo, evil) => { process.env.GIT_EXTERNAL_DIFF = shq(evil) },
     control: repo => plainGit(repo, 'diff'),
     teardown: () => { delete process.env.GIT_EXTERNAL_DIFF },
   },
@@ -178,7 +178,7 @@ test('a partial clone never lazily fetches through a repository-configured trans
   const evil = join(plantDir, 'evil-ssh.sh')
   await writeFile(evil, `#!/bin/sh\necho "ssh $*" >> '${marker}'\nexit 1\n`)
   await chmod(evil, 0o755)
-  git(clone, 'config', 'core.sshCommand', evil)
+  git(clone, 'config', 'core.sshCommand', shq(evil))
   git(clone, 'config', 'remote.origin.url', 'ssh://example.invalid/repo.git')
   await writeFile(join(clone, 'a.txt'), 'two\n')
   // Control: unprotected git needs the missing blob and runs the planted ssh command.

@@ -111,3 +111,32 @@ test('CLI: node lib/workspace/baseline.mjs <root> <outFile> <openedAtIso> writes
   assert.deepEqual(JSON.parse(await readFile(missing, 'utf8')).files, {})
   assert.equal(existsSync(missing), true)
 })
+
+test('the walk stops after maxFiles files and never walks the home directory (portability-11)', async () => {
+  const root = await tmpDir()
+  for (const rel of ['a/1.txt', 'a/2.txt', 'b/3.txt', 'c/4.txt', 'c/5.txt']) {
+    await mkdir(join(root, rel, '..'), { recursive: true })
+    await writeFile(join(root, rel), rel)
+  }
+  const baseline = await takeBaseline(root, { maxFiles: 2 })
+  assert.equal(baseline.method, 'walk')
+  assert.equal(baseline.complete, true)
+  assert.equal(baseline.truncated, true)
+  assert.deepEqual(Object.keys(baseline.files), ['a/1.txt', 'a/2.txt'])
+  await writeFile(join(root, 'a/0.txt'), 'created before the cutoff')
+  await writeFile(join(root, 'c/6.txt'), 'created after it')
+  const text = await baselineDelta(baseline, root)
+  assert.match(text, /CREATED \(1\):\n {2}a\/0\.txt/)
+  assert.doesNotMatch(text, /6\.txt|DELETED/)
+  const home = process.env.HOME
+  process.env.HOME = root
+  try {
+    const refused = await takeBaseline(root, { maxFiles: 2 })
+    assert.equal(refused.complete, false)
+    assert.deepEqual(refused.files, {})
+    assert.equal(await baselineDelta(baseline, root), '')
+  } finally {
+    if (home === undefined) delete process.env.HOME
+    else process.env.HOME = home
+  }
+})

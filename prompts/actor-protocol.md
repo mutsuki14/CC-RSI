@@ -19,8 +19,8 @@ VERIFICATION RUNNING, call wait_verdict until the verdict arrives. A result that
 is not a verdict about your work.
 
 Your durable memory is a read-only directory: {{MEMORY_DIR}}
-Read it with your ordinary file tools (Read, Grep, Glob, Bash); there are no memory tools, and edits to
-that directory are discarded.
+Read it with your ordinary tools (Read, or shell commands such as ls, grep and find); there are no memory
+tools, and edits to that directory are discarded.
 
 {{MODE_SECTION}}
 

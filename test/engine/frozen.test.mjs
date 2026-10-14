@@ -65,6 +65,25 @@ describe('frozen lineage', () => {
     assert.match(prompts[0], /procedure\.md/)
   })
 
+  it('a stalled frozen attempt resumes in a fresh Actor context that keeps the frozen boundary and its scratch (prompts-8, protocol-7, prompts-3)', async () => {
+    // The stalled context's forced inspection FAILs (frozen: not terminal), so a fresh context resumes.
+    const e = await engineEnv({ world: { actors: { t001: { stall: true } }, verdicts: { t001: ['FAIL', 'PASS'] } } })
+    const frozenTree = await seedAndFreeze(e)
+    const { dir } = await create(e, { phase: 'frozen', id: 'f3', target: TARGET })
+    const r = await run(e, dir)
+    assert.equal(r.status, 'completed', JSON.stringify(r))
+    const j = await OpJournal.open(dir)
+    const scratch = join(e.layout('f3').W, 'actor-private', 't001', 'scratch')
+    const opening = e.fake.session(j.result('t001/actor@0/open').sessionId).turns[0].prompt
+    assert.ok(opening.includes(`in your private scratch directory ${scratch}`), 'the first opening names the Actor scratch')
+    const resumed = e.fake.session(j.result('t001/actor@1/open').sessionId).turns[0].prompt
+    assert.match(resumed, /continuing this target attempt/)
+    assert.match(resumed, /Durable memory is frozen/)
+    assert.doesNotMatch(resumed, /memory-distillation/)
+    assert.ok(resumed.includes(`in your private scratch directory ${scratch}`))
+    assert.equal((await storeJournal(e)).tree, frozenTree)
+  })
+
   it('pauses with infra memory_frozen_tamper when the frozen tree changed', async () => {
     const e = await engineEnv({ world: {} })
     await seedAndFreeze(e)

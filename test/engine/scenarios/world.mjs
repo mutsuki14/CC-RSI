@@ -10,6 +10,7 @@
 //   deepPlan: {"<evolution>": [decision, …]}                  Phase-2 decisions per target attempt count
 //   verdicts: {"<ep>"|"*": [verdict per generation]}          Verifier verdicts (last repeats)
 //   verifierMutate: [ep]                                      the Verifier writes into its candidate
+//   verifierCrashOnce: [ep]                                   the first Verifier message of ep crashes after init (once)
 //   actors: {"<ep>": {…}}                                     per-episode Actor behaviour (below)
 //   curriculumCrashOnce: 'before-init' | 'after-init'         first Curriculum message crashes (once)
 //   curriculumAuditText: string                               appended to the first wave handoff
@@ -20,7 +21,11 @@
 // actors options: stall (liveness stall unless the context is a resumed one; 'quiet' changes no file), crashOnce/crashAlways
 // ('before-init'|'after-init'|…), apiErrorOnce {status, error}, hangOnce <ms>, emptyRootOnce,
 // extraMemoryFiles <n>, concurrentCommitOnce (another session commits during distillation),
-// apiErrorAt {marker, error} (once, on the first message containing marker), noActionWork. "Once" behaviours are keyed by the episode without its -a<n> restart suffix.
+// apiErrorAt {marker, error} (once, on the first message containing marker), noActionWork, evidenceNoAction (an
+// evidence round after UNVERIFIED re-submits without any tool action), learnWritesRoot (FINAL MEMORY DISTILLATION
+// also rewrites out.txt in the project root, after the verdict), absoluteConfig (the work phase also writes
+// config.ini whose data_dir is the absolute <cwd>/data, and data/x.txt; a Verifier that finds config.ini probes
+// that absolute path with `ls`). "Once" behaviours are keyed by the episode without its -a<n> restart suffix.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
@@ -147,7 +152,7 @@ function loseVerifierTranscripts(ctx, ep) {
     try {
       const session = JSON.parse(readFileSync(join(dir, name), 'utf8'))
       const first = session.turns?.[0]?.prompt ?? ''
-      if (first.includes('VERIFIER AGENT') && first.includes(`/verify/${ep}/candidate`)) rmSync(join(dir, name), { force: true })
+      if (first.includes('VERIFIER AGENT') && new RegExp(`^CANDIDATE ROOT: .*/projects/${ep}\\s*$`, 'm').test(first)) rmSync(join(dir, name), { force: true })
     } catch {
       // not a session file
     }
@@ -172,6 +177,7 @@ async function actor(ctx, w) {
     observe(ctx, { kind: 'distill', ep, seen, phaseWritable: true })
     const actions = [{ tool: 'Write', file_path: join(memoryDir, `lesson-${base}.md`), content: `lesson from ${base}\nseen before: ${seen.join(', ') || '(none)'}\n` }]
     for (let i = 1; i <= (conf.extraMemoryFiles ?? 0); i++) actions.push({ tool: 'Write', file_path: join(memoryDir, `extra-${base}-${i}.md`), content: `extra ${i}\n` })
+    if (conf.learnWritesRoot) actions.push({ tool: 'Write', file_path: join(ctx.cwd, 'out.txt'), content: 'REWRITTEN AFTER THE VERDICT\n' })
     return { actions, text: 'Draft memory written.' }
   }
   if (p.includes('MEMORY LIMITS')) {
@@ -189,7 +195,7 @@ async function actor(ctx, w) {
     if (w.loseVerifierTranscript === base && once(ctx, `lose-verifier-${base}`)) loseVerifierTranscripts(ctx, ep)
     const sentinel = w.sentinel ? 'NARRATIVE-SENTINEL this narrative must never reach the Verifier\n' : ''
     return {
-      actions: [{ tool: 'Write', file_path: join(ctx.cwd, 'evidence.txt'), content: `evidence for ${base}\n` }],
+      actions: conf.evidenceNoAction ? [] : [{ tool: 'Write', file_path: join(ctx.cwd, 'evidence.txt'), content: `evidence for ${base}\n` }],
       text: `STATUS: SUBMIT\n${sentinel}CLAIM: the output file exists\nPROBE: test -f out.txt && echo PASS`,
     }
   }
@@ -212,7 +218,12 @@ async function actor(ctx, w) {
   if (conf.emptyRootOnce && once(ctx, `empty-root-${base}`)) {
     return { actions: [{ tool: 'Bash', command: 'rm -rf ./* ./.[!.]* 2>/dev/null; true' }], text: 'Cleaned up.\nSTATUS: SUBMIT' }
   }
-  return { actions: [{ tool: 'Write', file_path: join(ctx.cwd, 'out.txt'), content: `result for ${base}\n` }], text: `Work on ${base} is complete.\nSTATUS: SUBMIT` }
+  const work = [{ tool: 'Write', file_path: join(ctx.cwd, 'out.txt'), content: `result for ${base}\n` }]
+  if (conf.absoluteConfig) {
+    work.push({ tool: 'Write', file_path: join(ctx.cwd, 'data', 'x.txt'), content: 'x\n' })
+    work.push({ tool: 'Write', file_path: join(ctx.cwd, 'config.ini'), content: `data_dir=${join(ctx.cwd, 'data')}\n` })
+  }
+  return { actions: work, text: `Work on ${base} is complete.\nSTATUS: SUBMIT` }
 }
 
 // ---------------------------------------------------------------------------------------- Verifier
@@ -226,6 +237,9 @@ function verifier(ctx, w) {
   const gen = Number((/candidate generation (\d+)/.exec(charter) ?? [])[1] ?? 1)
   const list = lookup(w.verdicts, ep) ?? ['PASS']
   const verdict = list[Math.min(gen, list.length) - 1]
+  if ((w.verifierCrashOnce ?? []).includes(ep) && once(ctx, `verifier-crash-${ep}`)) return { crash: 'after-init' }
+  let configDataDir = null
+  try { configDataDir = (/^data_dir=(.+)$/m.exec(readFileSync(join(ctx.cwd, 'config.ini'), 'utf8')) ?? [])[1] ?? null } catch { configDataDir = null }
   observe(ctx, {
     kind: 'inspect',
     ep,
@@ -240,8 +254,13 @@ function verifier(ctx, w) {
     otherVerifier: charter.includes('You are a fresh Verifier context on a different model'),
     originalFixtures: charter.includes(join(W, 'verify', ep, 'original')),
     unverifiedAllowed: charter.includes('VERDICT: UNVERIFIED'),
+    root,
+    priorInvestigations: charter.includes('Your prior investigations remain yours'),
+    configDataDir,
+    configDataDirExists: configDataDir !== null && existsSync(configDataDir),
   })
   const actions = [{ tool: 'Bash', command: 'ls -1' }]
+  if (configDataDir) actions.push({ tool: 'Bash', command: `ls -1 ${JSON.stringify(configDataDir)}` })
   if ((w.verifierMutate ?? []).includes(ep)) actions.push({ tool: 'Bash', command: 'echo tampered > tampered-by-verifier.txt' })
   return { actions, text: `Inspection of ${baseOf(ep)} generation ${gen}.\nVERDICT: ${verdict}` }
 }

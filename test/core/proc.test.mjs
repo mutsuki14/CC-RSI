@@ -1,10 +1,13 @@
 // Process helpers (SPEC §0 "Processes", §5.5).
 
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { execFileSync, spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
+import { LeaseLock } from '../../lib/core/lock.mjs'
 import { killGracefully, pidAlive, runCapture, spawnDetached } from '../../lib/core/proc.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
 
@@ -104,6 +107,54 @@ describe('proc', () => {
     assert.equal(big.truncated, true)
     const cwd = await tmpDir()
     assert.equal((await runCapture(process.execPath, ['-e', 'process.stdout.write(process.cwd() + process.env.Y)'], { cwd, env: { ...process.env, Y: '!' } })).stdout, `${cwd}!`)
+  })
+
+  it('a zombie (exited, never reaped) is gone for pidAlive, for a group and for a lease lock (Linux)', { skip: process.platform !== 'linux' ? 'zombie states are read from /proc' : false }, async () => {
+    // `exec sleep` replaces the shell, so nothing ever reaps the background child: it stays a zombie.
+    const zombieOf = async script => {
+      const child = spawn('sh', ['-c', script], { stdio: ['ignore', 'pipe', 'ignore'] })
+      let out = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      assert.ok(await waitFor(() => /^\d+\n/.test(out)))
+      const pid = Number(out.trim())
+      const state = () => {
+        try {
+          const text = readFileSync(`/proc/${pid}/stat`, 'utf8')
+          return text.slice(text.lastIndexOf(')') + 2).split(' ')[0]
+        } catch {
+          return null
+        }
+      }
+      assert.ok(await waitFor(() => state() === 'Z'), 'the child became a zombie')
+      return { pid, parent: child }
+    }
+    const { pid, parent } = await zombieOf('sleep 0 & echo $!; exec sleep 30')
+    try {
+      assert.doesNotThrow(() => process.kill(pid, 0), 'kill(pid, 0) still succeeds for a zombie')
+      assert.equal(pidAlive(pid), false)
+      // A lock left by a holder that is now a zombie is taken over at once.
+      const dir = await tmpDir()
+      const path = join(dir, 'x.lock')
+      await writeFile(path, JSON.stringify({ pid, host: hostname(), token: 'zombie:1', at: '' }))
+      assert.match((await LeaseLock.inspect(path)).reason, /gone/)
+    } finally {
+      parent.kill('SIGKILL')
+    }
+    let setsid = true
+    try { execFileSync('sh', ['-c', 'command -v setsid'], { stdio: 'ignore' }) } catch { setsid = false }
+    if (setsid) {
+      // A process group whose only member is a zombie: killGracefully reports it gone at once.
+      const group = await zombieOf('setsid sh -c "exit 0" & echo $!; exec sleep 30')
+      try {
+        assert.doesNotThrow(() => process.kill(-group.pid, 0))
+        const started = Date.now()
+        assert.equal(await killGracefully(group.pid, { graceMs: 2000, group: true }), 'gone')
+        assert.ok(Date.now() - started < 1000)
+      } finally {
+        group.parent.kill('SIGKILL')
+      }
+    }
+    assert.equal(pidAlive(process.pid), true)
   })
 
   it('pidAlive is false after a spawned child exits (reaped)', async () => {

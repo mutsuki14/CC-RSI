@@ -3,12 +3,14 @@
 // --live auth + hook probes against the fake claude (§15.2).
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync, chmodSync, utimesSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 import { main } from '../../lib/cli/main.mjs'
+import { writeShim } from '../../lib/cli/shim.mjs'
 import { sha256Hex } from '../../lib/core/digest.mjs'
 import { globalLayout, projectKey, projectLayout, sessionLayout } from '../../lib/core/paths.mjs'
 import { MemoryStore } from '../../lib/memory/store.mjs'
@@ -59,7 +61,7 @@ describe('cc-rsi doctor', () => {
     assert.match(find(r.stdout, 'claude')[0], /^PASS claude: .*2\.1\.296; every required flag is present$/)
     assert.match(find(r.stdout, 'home')[0], /^PASS home: .* writable, mode 700/)
     assert.match(find(r.stdout, 'locks')[0], /^PASS locks: no workspace locks$/)
-    assert.match(find(r.stdout, 'models')[0], /^PASS models: Verifier verifier-model \(config\); Actor \(default\) \(default\)$/)
+    assert.match(find(r.stdout, 'models')[0], /^PASS models: Verifier verifier-model \(config\); session model not yet known \(read from the transcript at the first cc-rsi tool call\)$/)
     if (existsSync(join(ROOT, 'mcp', 'server.mjs'))) assert.match(find(r.stdout, 'mcp')[0], /^PASS mcp: the rsi server lists submit, wait_verdict, learn, memory_commit, status$/)
     assert.equal(find(r.stdout, 'live-auth').length, 0, 'no model call without --live')
     assert.equal(s.fake.log().filter(e => e.argv.includes('-p')).length, 0)
@@ -109,6 +111,8 @@ describe('cc-rsi doctor', () => {
     const broken = await s.run(['doctor', '--live'])
     assert.equal(broken.code, 1)
     assert.match(find(broken.stdout, 'claude')[0], /^FAIL claude: \/nonexistent\/claude is missing or reported no version → install Claude Code/)
+    // portability-6: remedies name the real config file, not a hard-coded ~/.cc-rsi.
+    assert.ok(find(broken.stdout, 'claude')[0].endsWith(`set children.claudeBin in ${join(s.home, 'config.json')}`), find(broken.stdout, 'claude')[0])
     assert.match(find(broken.stdout, 'live')[0], /^FAIL live: skipped: claude is not usable/)
   })
 
@@ -148,4 +152,98 @@ describe('cc-rsi doctor', () => {
     assert.match(find(r.stdout, 'live-hooks')[0], /^FAIL live-hooks: hooks_not_run: /)
     assert.match(find(r.stdout, 'live-auth')[0], /^WARN live-auth: not proven/)
   })
+
+  it('checks the terminal shim and PATH, and names the real home in remedies (portability-6)', async () => {
+    const s = await setup()
+    // No shim yet.
+    const none = await s.run(['doctor'])
+    assert.match(find(none.stdout, 'shim')[0], /^WARN shim: .*\/bin\/cc-rsi does not exist yet: "cc-rsi" does not run in a terminal .* → start a Claude Code session/)
+    assert.ok(find(none.stdout, 'shim')[0].includes(`export PATH="${join(s.home, 'bin')}:$PATH"`))
+    // The shim exists, but <home>/bin is not on PATH.
+    await writeShim(s.home, ROOT)
+    const off = await s.run(['doctor'])
+    assert.equal(find(off.stdout, 'shim')[0], `WARN shim: ${join(s.home, 'bin')} is not on PATH, so "cc-rsi" does not run in a terminal (human-only commands need it) → export PATH="${join(s.home, 'bin')}:$PATH" (in your shell profile)`)
+    const on = await s.run(['doctor'], { PATH: `${join(s.home, 'bin')}:${s.env.PATH}` })
+    assert.match(find(on.stdout, 'shim')[0], /^PASS shim: .* → .*\/bin\/cc-rsi; .* is on PATH$/)
+    // A shim pointing at a removed plugin root.
+    writeFileSync(join(s.home, 'bin', 'cc-rsi'), '#!/bin/sh\nexec node "/nonexistent/plugin/bin/cc-rsi" "$@"\n')
+    const stale = await s.run(['doctor'], { PATH: `${join(s.home, 'bin')}:${s.env.PATH}` })
+    assert.match(find(stale.stdout, 'shim')[0], /^WARN shim: .* points at \/nonexistent\/plugin\/bin\/cc-rsi, which no longer exists/)
+    assert.equal(stale.code, 0, 'a shim warning never fails doctor')
+    // The models remedy names <home>/config.json.
+    writeFileSync(join(s.home, 'config.json'), JSON.stringify({ children: { claudeBin: s.fake.bin }, models: { verifier: 'same-model', actor: 'same-model' } }))
+    const same = await s.run(['doctor'])
+    assert.ok(find(same.stdout, 'models')[0].endsWith(`set the verifier_model plugin option (/plugin configure) or models.verifier in ${join(s.home, 'config.json')}`), find(same.stdout, 'models')[0])
+    // Two unknown models are not "equal" (cc-integration-3): no false warning.
+    writeFileSync(join(s.home, 'config.json'), JSON.stringify({ children: { claudeBin: s.fake.bin } }))
+    const unknown = await s.run(['doctor'], { ANTHROPIC_MODEL: '' })
+    assert.match(find(unknown.stdout, 'models')[0], /^PASS models: Verifier \(default\) \(\w+\); session model not yet known/, find(unknown.stdout, 'models')[0])
+  })
+
+  it('--release-lock never releases a live lock, whatever host it names (portability-7)', async () => {
+    const s = await setup()
+    const g = globalLayout(s.home)
+    mkdirSync(g.locks, { recursive: true })
+    const lockPath = join(g.locks, `${sha256Hex(s.root).slice(0, 24)}.json`)
+    // Written by this machine under its previous hostname a moment ago: the lease is live.
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, host: 'Johns-MacBook-Pro.local', token: 't:1', at: new Date().toISOString(), owner: { root: s.root, jobId: 'j-7', sessionId: 'sess-7', restoreFailed: false } }))
+    const refused = await s.run(['doctor', '--release-lock', s.repo])
+    assert.equal(refused.code, 3, refused.stdout + refused.stderr)
+    assert.match(refused.stderr, /was renewed within the last 30 s; a verification may still run/)
+    assert.ok(existsSync(lockPath))
+    // Once the lease expired it is released.
+    const old = new Date(Date.now() - 120000)
+    utimesSync(lockPath, old, old)
+    const released = await s.run(['doctor', '--release-lock', s.repo])
+    assert.equal(released.code, 0, released.stdout + released.stderr)
+    assert.equal(existsSync(lockPath), false)
+  })
+
+  it('reports a dead job\'s checkpoint-open lock as recovery pending; --release-lock removes the lock and every restore-failed marker (memory-crash-2/-3)', async () => {
+    const s = await setup()
+    const g = globalLayout(s.home)
+    mkdirSync(g.locks, { recursive: true })
+    const base = sha256Hex(s.root).slice(0, 24)
+    const lockPath = join(g.locks, `${base}.json`)
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid
+    const jobFile = join(s.pl.dir, 'sessions', 'sess-9', 'jobs', 'j-9.json')
+    writeFileSync(lockPath, JSON.stringify({ pid: dead, host: hostname(), token: 't:9', at: new Date().toISOString(),
+      owner: { root: s.root, jobId: 'j-9', sessionId: 'sess-9', jobFile, restoreFailed: false, checkpointOpen: true } }))
+    const old = new Date(Date.now() - 120000)
+    utimesSync(lockPath, old, old)
+    const r = await s.run(['doctor'])
+    assert.match(find(r.stdout, 'locks')[0], /^WARN locks: job j-9 died with its checkpoint of .* open; recovery pending/, find(r.stdout, 'locks')[0])
+    // A restore failure recorded for another job of the same root is a separate sticky marker.
+    const marker = join(g.locks, `${base}.restore-failed-j-8.json`)
+    writeFileSync(marker, JSON.stringify({ pid: dead, host: hostname(), token: 'restore-failed:x', at: new Date().toISOString(),
+      owner: { root: s.root, jobId: 'j-8', restoreFailed: true, marker: true } }))
+    const released = await s.run(['doctor', '--release-lock', s.repo])
+    assert.equal(released.code, 0, released.stdout + released.stderr)
+    assert.match(released.stdout, /may still hold the Verifier's changes/)
+    assert.equal(existsSync(lockPath), false)
+    assert.equal(existsSync(marker), false, 'the marker alone would keep the root blocked')
+  })
+
+  it('counts only drafts of gone owners or committed episodes as abandoned (memory-crash-4/-5)', async () => {
+    const s = await setup()
+    const store = await MemoryStore.open(s.pl.store, { sessionsDir: s.pl.sessions, lineagesDir: s.pl.lineages })
+    const dir = join(s.pl.drafts, 'live-ep')
+    await store.openDraft('live-ep', { dir, owner: { kind: 'engine', pid: process.pid } })
+    await store.close()
+    // A live owner's directory momentarily missing is transient, not abandoned.
+    const { rmSync } = await import('node:fs')
+    rmSync(dir, { recursive: true, force: true })
+    const r = await s.run(['doctor'])
+    assert.match(find(r.stdout, 'store-drafts')[0], /^PASS store-drafts: 1 open draft\(s\): live-ep$/, find(r.stdout, 'store-drafts')[0])
+  })
+
+  it('uses the plugin options saved in Claude Code user settings (portability-3)', async () => {
+    const s = await setup()
+    writeFileSync(join(s.home, 'config.json'), JSON.stringify({ children: { claudeBin: s.fake.bin } }))
+    writeFileSync(join(s.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ pluginConfigs: { 'cc-rsi@inline': { options: { verifier_model: 'saved-verifier-model' } } } }))
+    const r = await s.run(['doctor'])
+    assert.match(find(r.stdout, 'models')[0], /^PASS models: Verifier saved-verifier-model \(config\); /)
+    assert.ok(find(r.stdout, 'config')[0].includes(`plugin options verifier_model=saved-verifier-model from ${join(s.env.CLAUDE_CONFIG_DIR, 'settings.json')} pluginConfigs["cc-rsi@inline"]`), find(r.stdout, 'config')[0])
+  })
 })
+

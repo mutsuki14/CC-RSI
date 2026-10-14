@@ -7,13 +7,13 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import {
-  chmod, chown, lstat, mkdir, readFile, readdir, readlink, rm, stat, symlink, truncate, utimes, writeFile,
+  chmod, chown, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, symlink, truncate, utimes, writeFile,
 } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { runNode } from '../_helpers/spawn.mjs'
-import { gitEnv, gitRepo, tmpDir } from '../_helpers/tmp.mjs'
+import { gitEnv, gitRepo, tmpDir, unprivilegedSkip } from '../_helpers/tmp.mjs'
 import { Checkpoint } from '../../lib/workspace/checkpoint.mjs'
 import { statusDigest } from '../../lib/workspace/git.mjs'
 
@@ -381,7 +381,7 @@ async function unprivilegedBase() {
   return base
 }
 
-test('never deletes or displaces files of a directory it could not read when the checkpoint was taken', async () => {
+test('never deletes or displaces files of a directory it could not read when the checkpoint was taken', { skip: unprivilegedSkip() }, async () => {
   const base = await unprivilegedBase()
   const env = { PATH: process.env.PATH, HOME: base, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', BASE: base }
   const run = await runUnprivileged(`
@@ -415,7 +415,7 @@ test('never deletes or displaces files of a directory it could not read when the
   assert.deepEqual(result.displaced, [])
 })
 
-test('tolerates ordinary workspace states: a tracked directory replaced by a file, unreadable files', async () => {
+test('tolerates ordinary workspace states: a tracked directory replaced by a file, unreadable files', { skip: unprivilegedSkip() }, async () => {
   const base = await unprivilegedBase()
   const env = { PATH: process.env.PATH, HOME: base, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', BASE: base }
   const run = await runUnprivileged(`
@@ -444,4 +444,124 @@ test('tolerates ordinary workspace states: a tracked directory replaced by a fil
   const { compare, method } = JSON.parse(run.stdout)
   assert.equal(method, 'git')
   assert.deepEqual(compare, { changed: [], created: [], deleted: [] })
+})
+
+test('restore never destroys a file something outside the inspection creates while it is put back (memory-crash-6)', async () => {
+  const base = await tmpDir('cc-rsi-cp-race-')
+  const root = join(base, 'ws')
+  await mkdir(root)
+  await writeFile(join(root, 'f.txt'), 'ORIGINAL\n')
+  const checkpoint = await Checkpoint.take(root, { dir: join(base, 'cp'), ...limits })
+  const kept = join(base, 'kept')
+  await mkdir(kept)
+  const displaced = join(base, 'displaced')
+  const log = join(base, 'writes.log')
+  const stopFile = join(base, 'stop')
+  await writeFile(log, '')
+  await rename(join(root, 'f.txt'), join(kept, 'original'))
+  // An editor autosave or a dev server: it creates f.txt (never replacing it) whenever it is absent.
+  const writer = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs')
+    const [file, log, stop] = process.argv.slice(1)
+    let n = 0
+    while (!fs.existsSync(stop)) {
+      try {
+        const fd = fs.openSync(file, 'wx')
+        const id = 'W' + n++
+        fs.writeSync(fd, id + '\\n')
+        fs.closeSync(fd)
+        fs.appendFileSync(log, id + '\\n')
+      } catch {}
+    }`, join(root, 'f.txt'), log, stopFile], { stdio: 'ignore' })
+  const exited = new Promise(resolvePromise => writer.once('exit', resolvePromise))
+  try {
+    for (let round = 0; round < 60; round++) {
+      while (!existsSync(join(root, 'f.txt'))) await new Promise(resolvePromise => setImmediate(resolvePromise))
+      await checkpoint.restore({ displacedDir: displaced })
+      // The harness moves whatever is now at f.txt aside, so the next round starts from a new write.
+      await rename(join(root, 'f.txt'), join(kept, `r${round}`)).catch(() => undefined)
+    }
+  } finally {
+    await writeFile(stopFile, '')
+    await exited
+  }
+  const contents = async dir => {
+    const out = []
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) out.push(...await contents(full))
+      else out.push((await readFile(full, 'utf8')).trim())
+    }
+    return out
+  }
+  const found = new Set([...await contents(kept), ...await contents(displaced), ...await contents(root)])
+  const written = (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean)
+  assert.ok(written.length >= 60)
+  assert.deepEqual(written.filter(id => !found.has(id)), [], 'every outside write is in the workspace or the displaced dir')
+  assert.equal(found.has('ORIGINAL'), true)
+  const leftovers = (await readdir(root)).filter(name => name.includes('cc-rsi-restore'))
+  assert.deepEqual(leftovers, [], 'no staging file is left in the workspace')
+})
+
+test('a displacement onto another filesystem copies, then removes the unchanged source and no tombstone (memory-crash-6)', async t => {
+  const otherFs = '/dev/shm'
+  let other = null
+  try {
+    if (existsSync(otherFs) && (await stat(otherFs)).dev !== (await stat(await tmpDir())).dev) other = otherFs
+  } catch {
+    other = null
+  }
+  if (other === null) {
+    t.skip('no second filesystem (/dev/shm) to displace onto')
+    return
+  }
+  const root = await tmpDir()
+  await writeFile(join(root, 'kept.txt'), 'kept')
+  const { dir } = await harness()
+  const checkpoint = await Checkpoint.take(root, { dir, ...limits })
+  await mkdir(join(root, 'made', 'deep'), { recursive: true })
+  await writeFile(join(root, 'made', 'deep', 'new.txt'), 'created by the inspection')
+  await writeFile(join(root, 'kept.txt'), 'changed by the inspection')
+  const displaced = await mkdtemp(join(other, 'cc-rsi-displaced-'))
+  try {
+    const result = await checkpoint.restore({ displacedDir: displaced })
+    assert.deepEqual(result.failed, [])
+    assert.deepEqual(result.restored, ['kept.txt'])
+    assert.equal(await read(join(root, 'kept.txt')), 'kept')
+    assert.equal(await read(join(displaced, 'kept.txt')), 'changed by the inspection')
+    assert.equal(await read(join(displaced, 'made', 'deep', 'new.txt')), 'created by the inspection')
+    assert.equal(existsSync(join(root, 'made', 'deep', 'new.txt')), false)
+    const names = await readdir(root, { recursive: true })
+    assert.deepEqual(names.filter(name => name.includes('.cc-rsi-')), [], 'no tombstone or staging file remains')
+  } finally {
+    await rm(displaced, { recursive: true, force: true })
+  }
+})
+
+test('outside git the walk refuses the home directory and fails closed above its bound (portability-11)', async () => {
+  const root = await tmpDir()
+  for (let i = 0; i < 60; i++) await writeFile(join(root, `f${String(i).padStart(2, '0')}.txt`), 'x')
+  const { dir } = await harness()
+  const started = Date.now()
+  await assert.rejects(Checkpoint.take(root, { dir, maxFiles: 10, walkMaxFiles: 20 }), err => {
+    assert.equal(err.code, 'checkpoint_failed')
+    assert.match(err.message, /more than 20 files outside git/)
+    return true
+  })
+  assert.ok(Date.now() - started < 5000)
+  assert.equal(existsSync(join(dir, 'entries.json')), false)
+  // Within the bound: detect-only above maxFiles, as before.
+  const checkpoint = await Checkpoint.take(root, { dir, maxFiles: 10, walkMaxFiles: 100 })
+  assert.equal(checkpoint.detectOnly, true)
+  assert.equal(Object.keys(checkpoint.manifest()).length, 60)
+  await checkpoint.dispose()
+  // A project opened in the home directory itself (not a git repository) is never walked.
+  const home = process.env.HOME
+  process.env.HOME = root
+  try {
+    await assert.rejects(Checkpoint.take(root, { dir, ...limits }), err => err.code === 'checkpoint_failed' && /your home directory/.test(err.message))
+  } finally {
+    if (home === undefined) delete process.env.HOME
+    else process.env.HOME = home
+  }
 })

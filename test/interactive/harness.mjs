@@ -35,12 +35,15 @@ export function cleanEnv(base) {
  * `{ home, repo, fake, env, sid, write(rel, text), read(rel) }`.
  */
 export async function setupProject({ files = { 'README.md': '# demo\n', 'src/app.txt': 'version 1\n' }, config = {}, script, scenario } = {}) {
-  const { home } = await tmpHome()
+  const { home, env: homeEnv } = await tmpHome()
   const repo = await gitRepo(files)
   const fake = await fakeClaude({ scenario: scenario ?? scenarioPath('scripted'), home })
   if (script) writeScript(fake, script)
   writeFileSync(join(home, 'config.json'), `${JSON.stringify(config, null, 2)}\n`)
-  const env = { ...cleanEnv(fake.env), CLAUDE_PROJECT_DIR: repo, CC_RSI_HOME: home, CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model' }
+  // Hermetic: a temp CLAUDE_CONFIG_DIR (the real ~/.claude settings and transcripts never reach a test).
+  const env = {
+    ...cleanEnv(fake.env), CLAUDE_PROJECT_DIR: repo, CC_RSI_HOME: home, CLAUDE_CONFIG_DIR: homeEnv.CLAUDE_CONFIG_DIR, CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model',
+  }
   return {
     home,
     repo,
@@ -106,8 +109,8 @@ export function fixture(name, p, { text = '', extra = {} } = {}) {
 
 /** A newline-delimited JSON-RPC client of `mcp/server.mjs` over real stdio. */
 export class McpClient {
-  constructor(env, { cwd } = {}) {
-    this.child = spawn(process.execPath, [SERVER], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+  constructor(env, { cwd, server = SERVER } = {}) {
+    this.child = spawn(process.execPath, [server], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     this.nextId = 1
     this.pending = new Map()
     this.notifications = []

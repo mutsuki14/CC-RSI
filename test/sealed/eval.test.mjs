@@ -4,7 +4,8 @@
 // a non-TTY; the sealed marker blocks learning.
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
@@ -12,10 +13,10 @@ import { main } from '../../lib/cli/main.mjs'
 import { LeaseLock } from '../../lib/core/lock.mjs'
 import { lineageLayout, projectKey, projectLayout } from '../../lib/core/paths.mjs'
 import { MemoryStore } from '../../lib/memory/store.mjs'
-import { parseScore, runSealedEvaluation, showEvaluation } from '../../lib/sealed/eval.mjs'
+import { escapingLink, parseScore, runSealedEvaluation, showEvaluation } from '../../lib/sealed/eval.mjs'
 import { treeFingerprint } from '../../lib/workspace/fingerprint.mjs'
 import { projectRoot as gitProjectRoot } from '../../lib/workspace/git.mjs'
-import { gitRepo, tmpDir, tmpHome } from '../_helpers/tmp.mjs'
+import { gitEnv, gitRepo, tmpDir, tmpHome } from '../_helpers/tmp.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 
@@ -61,6 +62,8 @@ const SCORING = `
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 const root = process.env.RSI_CANDIDATE_ROOT
+if (!process.env.TMPDIR || !process.env.TMPDIR.startsWith(join(root, '..'))) { console.error('TMPDIR is not inside the run dir: ' + process.env.TMPDIR); process.exit(5) }
+writeFileSync(join(process.env.TMPDIR, 'scratch.txt'), 'x')
 const leaks = Object.keys(process.env).filter(k => k.startsWith('CC_RSI_') || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_SESSION'))
 if (process.cwd() !== root) { console.error('cwd is not the candidate'); process.exit(3) }
 if (leaks.length) { console.error('leaked env ' + leaks.join(',')); process.exit(4) }
@@ -72,7 +75,7 @@ console.log(JSON.stringify({ score: ok ? 0.83 : 0 }))
 `
 
 /** A finished deep lineage with a final candidate, a committed memory file and a global evaluator config. */
-async function fixture({ command, evaluation = {}, phase = 'deep', result = true, id = 'deep-1' } = {}) {
+async function fixture({ command, evaluation = {}, phase = 'deep', result = true, id = 'deep-1', plant = null } = {}) {
   const { home, env } = await hermeticEnv()
   const repo = await gitRepo({ 'README.md': 'project\n' })
   const projectRoot = await gitProjectRoot(repo)
@@ -87,6 +90,7 @@ async function fixture({ command, evaluation = {}, phase = 'deep', result = true
   mkdirSync(join(tree, 'src'), { recursive: true })
   writeFileSync(join(tree, 'answer.txt'), '42\n')
   writeFileSync(join(tree, 'src', 'main.js'), 'console.log(42)\n')
+  if (plant) await plant({ tree, layout })
   const digest = await treeFingerprint(tree)
   if (result) {
     writeFileSync(layout.result, JSON.stringify({ schema_version: 1, lineage: id, phase, termination: 'verifier_pass', candidate_digest: digest, target_verifier_verdict: 'PASS' }))
@@ -115,6 +119,14 @@ describe('parseScore', () => {
   })
 })
 
+/** An evaluator that writes a pytest-style cache through `.pytest_cache` in its cwd and scores 1. */
+const CACHE_WRITER = `
+import { mkdirSync, writeFileSync } from 'node:fs'
+mkdirSync('.pytest_cache/v/cache', { recursive: true })
+writeFileSync('.pytest_cache/v/cache/lastfailed', JSON.stringify({ 'tests/test_hidden.py::test_secret': true }))
+console.log(1)
+`
+
 describe('runSealedEvaluation', () => {
   it('scores a private copy of the final candidate on frozen memory and withholds the score from a non-TTY', async () => {
     const f = await fixture({ command: await evaluator(SCORING) })
@@ -140,6 +152,7 @@ describe('runSealedEvaluation', () => {
     assert.equal(record.attempts[0].exit_code, 0)
     // The evaluator ran in the copy; the private source is untouched.
     assert.ok(existsSync(join(runDir, 'candidate', 'evaluator-was-here.txt')))
+    assert.equal(existsSync(join(runDir, 'tmp')), false, 'the evaluator TMPDIR (inside the run dir) is removed afterwards')
     assert.equal(await treeFingerprint(f.tree), f.digest)
     assert.equal(readFileSync(join(runDir, 'task.md'), 'utf8'), 'Compute the answer.')
     // Store: frozen, intact, sealed; the lineage marker carries no score.
@@ -368,3 +381,94 @@ describe('sealed evaluation of a real deep lineage (engine + fake claude)', { sk
     assert.match(out.join(''), /memory is frozen|sealed evaluation/)
   })
 })
+
+describe('sealed evaluation containment (security-7, security-12)', () => {
+  it('never runs the evaluator in a candidate with a link that leaves it, and records the run as blocked', async () => {
+    const outside = await tmpDir('cc-rsi-model-visible-')
+    const f = await fixture({
+      command: await evaluator(CACHE_WRITER),
+      plant: async ({ tree, layout }) => {
+        symlinkSync(join(outside, 'cache'), join(tree, '.pytest_cache'))
+        // As captureCandidate records a tree it had to copy verbatim.
+        writeFileSync(join(layout.priv, 'final-candidate', 'manifest.json'), JSON.stringify({ unsafe: '.pytest_cache is a symbolic link that leaves the tree' }))
+      },
+    })
+    const r = await runSealedEvaluation({ home: f.home, projectRoot: f.projectRoot, lineageId: f.id, stdout: sink(false), env: f.env, retryDelayMs: 0 })
+    assert.equal(r.status, 'blocked')
+    const record = JSON.parse(readFileSync(join(f.pl.sealed, f.id, r.runId, 'evaluation.json'), 'utf8'))
+    assert.deepEqual(record.attempts, [])
+    assert.equal(record.score, null)
+    assert.match(record.blocked_reason, /could not be captured safely \(\.pytest_cache is a symbolic link that leaves the tree\); the evaluator was not run/)
+    assert.deepEqual(readdirSync(outside), [], 'nothing was written outside the run directory')
+  })
+
+  it('also blocks a link that only escapes physically (a -> b/../x with b -> .), without a manifest flag', async () => {
+    const f = await fixture({
+      command: await evaluator(CACHE_WRITER),
+      plant: async ({ tree }) => {
+        // Lexically .pytest_cache stays inside (b/.. = .); on the filesystem b/.. is the parent of the tree.
+        symlinkSync('.', join(tree, 'b'))
+        symlinkSync('b/../escaped-cache', join(tree, '.pytest_cache'))
+      },
+    })
+    const r = await runSealedEvaluation({ home: f.home, projectRoot: f.projectRoot, lineageId: f.id, stdout: sink(false), env: f.env, retryDelayMs: 0 })
+    assert.equal(r.status, 'blocked')
+    const runDir = join(f.pl.sealed, f.id, r.runId)
+    const record = JSON.parse(readFileSync(join(runDir, 'evaluation.json'), 'utf8'))
+    assert.deepEqual(record.attempts, [])
+    assert.match(record.blocked_reason, /contains a link that leaves the tree \(\.pytest_cache -> b\/\.\.\/escaped-cache\)/)
+    assert.equal(existsSync(join(runDir, 'escaped-cache')), false, 'the evaluator never ran')
+  })
+
+  it('escapingLink: absolute, lexical and physical escapes; internal and dangling-internal links are fine', async () => {
+    const root = await tmpDir('cc-rsi-links-')
+    mkdirSync(join(root, 'sub', 'deep'), { recursive: true })
+    writeFileSync(join(root, 'sub', 'f.txt'), 'x')
+    symlinkSync('f.txt', join(root, 'sub', 'ok'))
+    symlinkSync('../sub/deep', join(root, 'sub', 'ok-dir'))
+    symlinkSync('missing-inside', join(root, 'dangling-ok'))
+    assert.equal(await escapingLink(root), null)
+    const abs = await tmpDir('cc-rsi-links-')
+    symlinkSync('/tmp', join(abs, 'a'))
+    assert.match(await escapingLink(abs), /^a -> \/tmp$/)
+    const lexical = await tmpDir('cc-rsi-links-')
+    mkdirSync(join(lexical, 'd'))
+    symlinkSync('../../nowhere', join(lexical, 'd', 'up'))
+    assert.match(await escapingLink(lexical), /^d\/up -> /)
+    const physical = await tmpDir('cc-rsi-links-')
+    mkdirSync(join(physical, 'd'))
+    symlinkSync('..', join(physical, 'd', 'parent'))
+    symlinkSync('d/parent/../new-file', join(physical, 'w'))
+    assert.match(await escapingLink(physical), /^w -> d\/parent\/\.\.\/new-file$/)
+  })
+
+  it('compares --json-out physically and forbids every worktree of the project (security-12)', async () => {
+    const f = await fixture({ command: await evaluator(SCORING) })
+    // A symlinked spelling of the project root.
+    const links = await tmpDir('cc-rsi-links-')
+    symlinkSync(f.projectRoot, join(links, 'proj'))
+    await assert.rejects(
+      runSealedEvaluation({ home: f.home, projectRoot: f.projectRoot, lineageId: f.id, jsonOut: join(links, 'proj', 'score.json'), stdout: sink(true), env: f.env }),
+      /--json-out .* lies inside the project/,
+    )
+    // A second worktree of the same repository (it shares the project key).
+    const wt = join(await tmpDir('cc-rsi-wt-'), 'second')
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', wt], { cwd: f.repo, env: gitEnv(), stdio: 'ignore' })
+    await assert.rejects(
+      runSealedEvaluation({ home: f.home, projectRoot: f.projectRoot, lineageId: f.id, jsonOut: join(wt, 'score.json'), stdout: sink(true), env: f.env }),
+      /--json-out .* lies inside the project worktree/,
+    )
+    // Interactive Verifier scratch.
+    await assert.rejects(
+      runSealedEvaluation({ home: f.home, projectRoot: f.projectRoot, lineageId: f.id, jsonOut: join(f.home, 'vscratch', 's', 'score.json'), stdout: sink(true), env: f.env }),
+      /lies inside the interactive Verifier scratch/,
+    )
+    // Through the CLI, a relative path typed in a symlinked spelling of the project is refused too.
+    const out = []
+    const io = { stdout: { write: x => out.push(x), isTTY: false }, stderr: { write: x => out.push(x) }, env: f.env, cwd: join(links, 'proj'), isTTY: false }
+    assert.equal(await main(['eval', 'run', f.id, '--json-out', 'score.json'], io), 3, out.join(''))
+    assert.equal(existsSync(join(f.projectRoot, 'score.json')), false)
+    assert.equal(existsSync(join(f.pl.sealed, f.id)), false, 'a refused --json-out runs nothing')
+  })
+})
+

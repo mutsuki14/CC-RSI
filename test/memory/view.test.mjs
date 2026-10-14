@@ -1,7 +1,7 @@
 // materializeView / viewTreeHash (SPEC §6.7, §11.10).
 
 import assert from 'node:assert/strict'
-import { lstat, mkdir, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { rmrf } from '../../lib/core/atomic.mjs'
@@ -78,5 +78,37 @@ describe('materializeView', () => {
     await symlink('/etc/hostname', join(bad, 'link'))
     await assert.rejects(materializeView(bad, join(root, 'v2')), UnsafeMemoryPathError)
     assert.equal(await viewTreeHash(bad), null)
+  })
+
+  it('a refresh removes staging and old siblings a killed refresh left, never following links', async () => {
+    const { root, src } = await source()
+    const views = join(root, 'views')
+    const dest = join(views, 'memory')
+    await materializeView(src, dest)
+    const deadPid = 2 ** 22 + 777
+    const outside = join(root, 'outside')
+    await mkdir(outside)
+    await writeFile(join(outside, 'keep.md'), 'not ours')
+    // Leftovers of refreshes killed mid-way: a read-only staging tree, an old tree, a link.
+    const deadStaging = join(views, `memory.staging-${deadPid}-0123456789ab`)
+    await mkdir(join(deadStaging, 'lessons'), { recursive: true })
+    await writeFile(join(deadStaging, 'lessons', 'x.md'), 'x')
+    await chmod(join(deadStaging, 'lessons'), 0o555)
+    await chmod(deadStaging, 0o555)
+    await mkdir(join(views, `memory.old-${deadPid}-abcdef012345`))
+    await symlink(outside, join(views, `memory.old-${deadPid}-00000000000a`))
+    const oldFormat = join(views, 'memory.staging-0123456789ab')
+    await mkdir(oldFormat)
+    const old = new Date(Date.now() - 3_600_000)
+    await utimes(oldFormat, old, old)
+    // Kept: a refresh in flight (a live pid, or the earlier format but recent) and unrelated names.
+    const live = join(views, `memory.staging-${process.ppid}-111111111111`)
+    await mkdir(live)
+    await mkdir(join(views, 'memory.staging-222222222222'))
+    await writeFile(join(views, 'memory.notes'), 'unrelated')
+    await materializeView(src, dest)
+    assert.deepEqual((await readdir(views)).sort(),
+      ['memory', 'memory.notes', 'memory.staging-222222222222', `memory.staging-${process.ppid}-111111111111`].sort())
+    assert.equal(await readFile(join(outside, 'keep.md'), 'utf8'), 'not ours')
   })
 })

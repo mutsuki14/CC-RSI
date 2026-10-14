@@ -76,7 +76,10 @@ const CASES = {
     ['several', () => R.taskPin({ messages: TASK_MESSAGES })],
   ],
   engineSystem: [['default', () => R.engineSystem()]],
-  actorRuntimeContract: [['default', () => R.actorRuntimeContract({ projectRoot: `${W}/projects/p001`, memoryDir: `${W}/actor-private/p001/memory` })]],
+  actorRuntimeContract: [
+    ['default', () => R.actorRuntimeContract({ projectRoot: `${W}/projects/p001`, memoryDir: `${W}/actor-private/p001/memory` })],
+    ['scratch', () => R.actorRuntimeContract({ projectRoot: `${W}/projects/p001`, memoryDir: `${W}/actor-private/p001/memory`, scratchDir: `${W}/actor-private/p001/scratch` })],
+  ],
   practiceActorCharter: [
     ['with-memory', () => R.practiceActorCharter({
       instruction: 'In <PROJECT_ROOT>, merge in/a.csv and in/b.csv into out.csv sorted by id.',
@@ -91,12 +94,16 @@ const CASES = {
     ['deep', () => R.targetActorOpening({ target: 'Make `make test` pass without changing tests/.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, inventory: INVENTORY, frozen: false })],
     ['deep-empty', () => R.targetActorOpening({ target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, empty: true })],
     ['frozen', () => R.targetActorOpening({ target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, inventory: INVENTORY, frozen: true })],
+    ['deep-scratch', () => R.targetActorOpening({ target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, empty: true, scratchDir: `${W}/actor-private/t001/scratch` })],
+    ['frozen-scratch', () => R.targetActorOpening({ target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, empty: true, frozen: true, scratchDir: `${W}/actor-private/t001/scratch` })],
   ],
   resumeOpening: [
     ['handoff', () => R.resumeOpening({ changed: true, worklog: 'CURRENT STATE: parser half rewritten.\nNEXT: fix quoting.', target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory` })],
     ['handoff-no-log', () => R.resumeOpening({ worklog: '', target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory` })],
     ['pivot', () => R.resumeOpening({ changed: false, worklog: 'tried sed edits — failed because quoting.', review: '(1) sed edits (2) quoting (3) use the csv module', target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory` })],
     ['handoff-capped', () => R.resumeOpening({ changed: true, worklog: Array.from({ length: 400 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n'), target: 'T', projectRoot: '/r', memoryDir: '/m' }).length.toString()],
+    ['frozen-handoff', () => R.resumeOpening({ changed: true, worklog: 'CURRENT STATE: parser half rewritten.', target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, frozen: true })],
+    ['frozen-pivot-scratch', () => R.resumeOpening({ changed: false, worklog: 'tried sed edits.', review: '(3) use the csv module', target: 'Make `make test` pass.', projectRoot: `${W}/projects/t001`, memoryDir: `${W}/actor-private/t001/memory`, frozen: true, scratchDir: `${W}/actor-private/t001/scratch` })],
   ],
   summarizerSystem: [['default', () => R.summarizerSystem()]],
   summarizerRequest: [
@@ -158,6 +165,10 @@ const CASES = {
     ['live-rollback-unverified', () => R.verifierSystem({ location: 'live', sandbox: false, allowUnverified: true })],
     ['replay-sandbox-pass-fail', () => R.verifierSystem({ location: 'replay', sandbox: true, allowUnverified: false })],
     ['replay-unconfined-unverified', () => R.verifierSystem({ location: 'replay', sandbox: false, allowUnverified: true })],
+    ['live-rollback-full', () => R.verifierSystem({ location: 'live', sandbox: false, allowUnverified: true, checkpoint: 'full' })],
+    ['live-rollback-detect', () => R.verifierSystem({ location: 'live', sandbox: false, allowUnverified: false, checkpoint: 'detect' })],
+    ['live-sandbox-full', () => R.verifierSystem({ location: 'live', sandbox: true, allowUnverified: true, checkpoint: 'full' })],
+    ['live-sandbox-detect', () => R.verifierSystem({ location: 'live', sandbox: true, allowUnverified: true, detectOnly: true })],
   ],
   verifierCharter: [
     ['interactive-g1', () => R.verifierCharter({
@@ -196,6 +207,7 @@ const CASES = {
     ['unverified', () => R.verifierContinuation({ detail: 'your reply contained conflicting VERDICT lines (PASS, FAIL)', allowUnverified: true })],
     ['pass-fail', () => R.verifierContinuation({ detail: 'VERDICT: UNVERIFIED is not available here; use one of PASS or FAIL', allowUnverified: false })],
     ['bare-string', () => R.verifierContinuation('the harness resumed after a pause')],
+    ['syntax-near-miss', () => R.verifierContinuation({ detail: 'your reply had no standalone line "VERDICT: …" outside code fences; the line "- VERDICT: FAIL" is a list item, so it does not count', allowUnverified: true })],
   ],
   curriculumSystem: [['default', () => R.curriculumSystem()]],
   curriculumRuntimeContract: [['default', () => R.curriculumRuntimeContract({ cwd: `${W}/curriculum-private`, authoringRoot: `${W}/curriculum-private/practice/authoring`, notesFile: `${W}/curriculum-private/notes.md` })]],
@@ -209,7 +221,10 @@ const CASES = {
     ['none-with-history', () => R.deepCharter({ target: 'Make `make test` pass.', history: ['- Phase-2 target attempt 1: FAIL', '- Phase-2 practice project p001: PASS'], latestOutcome: R.targetOutcomeText({ target: 'Make `make test` pass.', verdict: 'FAIL', report: FAIL_REPORT, diagnosis: 'Quoting is the likely gap.', lifecycle: true }), notes: 'H1', memoryAccess: 'none', authoringRoot: `${W}/curriculum-private/practice/authoring` })],
   ],
   curriculumContinuation: [['default', () => R.curriculumContinuation({ detail: 'your reply had no standalone line "DECISION: …" outside code fences' })]],
-  phase1RecoveryNotice: [['default', () => R.phase1RecoveryNotice()]],
+  phase1RecoveryNotice: [
+    ['default', () => R.phase1RecoveryNotice()],
+    ['completed-boundary', () => R.phase1RecoveryNotice({ contextLost: false })],
+  ],
   outcomeText: [
     ['phase1', () => R.outcomeText({ label: 'PROJECT 2.1 (csv-merge)', instruction: 'In <PROJECT_ROOT> merge a.csv and b.csv.', verdict: 'PASS', reports: [PASS_REPORT], memoryChanges: { created: ['notes/b.md', 'notes/a.md'], modified: [], deleted: ['old.md'], unchanged: ['tools/x.py'] } })],
     ['phase2', () => R.outcomeText({ label: 'PRACTICE PROJECT p001', instruction: 'In <PROJECT_ROOT> merge a.csv and b.csv.', verdict: 'FAIL', reports: [FAIL_REPORT], memoryChanges: { created: [], modified: ['notes/a.md'], deleted: [] }, diagnosis: 'The quoting rule is the gap.' })],

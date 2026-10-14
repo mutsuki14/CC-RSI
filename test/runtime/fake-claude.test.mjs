@@ -4,7 +4,9 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, sep } from 'node:path'
 import { test } from 'node:test'
 import { REQUIRED_FLAGS } from '../../lib/runtime/claude-bin.mjs'
 import { fakeClaude, writeScript, scenarioPath } from '../_helpers/fake.mjs'
@@ -19,7 +21,8 @@ async function setup({ scenario = scenarioPath('scripted'), runHooks = true } = 
   const cwd = await tmpDir('cc-rsi-fake-cwd-')
   const env = { ...fake.env, CC_RSI_ROLE: 'verifier', CC_RSI_EXPECT: 'x', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' }
   for (const k of Object.keys(env)) if (/^CLAUDE_CODE_(SESSION_ID|REMOTE|ENTRYPOINT|CONTAINER_ID|EXECPATH|CHILD_SESSION|SESSION_ATTENDED)|^CLAUDECODE$|^CCR_|^CLAUDE_PLUGIN_|^MCP_TOOL_TIMEOUT$|INGRESS|^CLAUDE_CODE_(MESSAGING|SYNC|ARTIFACT|ACCOUNT|ORGANIZATION|USER_EMAIL|DIAGNOSTICS|DEBUG|TEE|USE_CCR|MAX_SUBAGENT)|^CLAUDE_(PID|EFFORT|AUTO_BACKGROUND_TASKS|AUTOCOMPACT_PCT_OVERRIDE|PROJECT_DIR|ENV_FILE)$/.test(k)) delete env[k]
-  const settingsFile = join(cwd, '..', `${UUID()}.settings.json`)
+  // Outside cwd (the role's working tree) but inside a temp dir that is removed at exit.
+  const settingsFile = join(await tmpDir('cc-rsi-fake-settings-'), 'settings.json')
   const writeSettings = s => writeFileSync(settingsFile, JSON.stringify(s))
   writeSettings({ permissions: { defaultMode: 'dontAsk', allow: ['Read', 'Bash', 'Grep', 'Glob'] } })
   const run = (args, { stdin = 'hello\n', extraEnv = {} } = {}) => runNode(fake.bin, args, { stdin, env: { ...env, ...extraEnv }, cwd })
@@ -36,6 +39,9 @@ test('--version and --help (every REQUIRED_FLAGS entry); neither is logged', asy
   const h = await s.run(['--help'])
   for (const flag of REQUIRED_FLAGS) assert.ok(h.stdout.includes(flag), flag)
   assert.equal(s.fake.log().length, 0)
+  // Test hygiene: the settings file lives in a temp dir removed at exit, never loose in TMPDIR.
+  assert.notEqual(dirname(s.settingsFile), await realpath(tmpdir()))
+  assert.ok(!s.settingsFile.startsWith(s.cwd + sep))
 })
 
 test('argument and environment refusals', async () => {

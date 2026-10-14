@@ -3,7 +3,7 @@
 // admission (terminal, live engine, drift, tamper), abandon and show.
 
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -57,6 +57,9 @@ describe('preflight', () => {
     const e = await engineEnv({ config: { isolation: { allowUnconfined: false } } })
     const auto = await preflight({ ...base(e), phase: 'broad', direction: 'd' })
     assert.match(auto.blockers.join('\n'), /no OS sandbox is available .* Re-run with --allow-unconfined/)
+    // The remedy names the real <home> (portability-6), never a hard-coded ~/.cc-rsi.
+    assert.ok(auto.blockers.join('\n').includes(`set isolation.allowUnconfined in ${join(e.home, 'config.json')}`), auto.blockers.join('\n'))
+    assert.ok(!auto.blockers.join('\n').includes('~/.cc-rsi'))
     const allowed = await preflight({ ...base(e), phase: 'broad', direction: 'd', allowUnconfined: true })
     assert.deepEqual(allowed.blockers, [])
     assert.equal(allowed.lineage.isolation.mode, 'unconfined')
@@ -68,6 +71,7 @@ describe('preflight', () => {
     writeFileSync(join(e.home, 'config.json'), JSON.stringify({ children: { claudeBin: e.fake.bin }, isolation: { sandbox: 'off' } }))
     const off = await preflight({ ...base(e), phase: 'broad', direction: 'd' })
     assert.match(off.blockers.join('\n'), /isolation\.sandbox=off/)
+    assert.ok(off.blockers.join('\n').includes(`set isolation.allowUnconfined in ${join(e.home, 'config.json')}`))
   })
 
   it('blocks a missing claude binary and an existing lineage id', async () => {
@@ -194,9 +198,16 @@ describe('daemon and resume', () => {
     assert.match(refused.reasons.join(' '), /plugin changed .*guardSha.*--accept-drift/)
     const accepted = await admitResume(dir, { pluginRoot: other, acceptDrift: true, env: e.env })
     assert.equal(accepted.ok, true)
+    // A snapshot taken by an older plugin lacks a template the current builders need.
+    const snapshot = e.layout('drift').promptsSnapshot
+    rmSync(join(snapshot, 'frozen-runtime-boundary.md'))
     await applyResume(dir, accepted)
     const lineage = readJson(join(dir, 'lineage.json'))
     assert.equal(lineage.lock.driftAccepted.length, 1)
+    // Accepting drift refreshes the snapshot with the code it now serves.
+    assert.ok(existsSync(join(snapshot, 'frozen-runtime-boundary.md')))
+    assert.match(lineage.lock.promptSha['frozen-runtime-boundary'], /^[0-9a-f]{64}$/)
+    assert.equal(lineage.lock.driftAccepted[0].promptsRefreshed, true)
     assert.ok((await protocolEvents(dir)).some(ev => ev.type === 'DRIFT_ACCEPTED'))
     assert.equal((await admitResume(dir, { pluginRoot: other, env: e.env })).ok, true) // accepted drift is the new baseline
     // Tamper.
@@ -205,6 +216,39 @@ describe('daemon and resume', () => {
     const tampered = await admitResume(dir, { env: e.env })
     assert.equal(tampered.ok, false)
     assert.match(tampered.reasons.join(' '), /changed outside a commit/)
+  })
+
+  it('pauses before any role child starts when the plugin code changed under a running lineage (security-4)', async () => {
+    const e = await engineEnv({ world: { waves: [[{ id: 'a' }]] } })
+    const other = await tmpDir('cc-rsi-plugin-copy-')
+    for (const sub of ['lib', 'hooks', 'prompts']) cpSync(join(REPO_ROOT, sub), join(other, sub), { recursive: true })
+    const { dir } = await create(e, { phase: 'broad', id: 'codechange', direction: 'd', pluginRoot: other })
+    // A role (or anything else) edits the role guard after the lineage recorded its baseline.
+    writeFileSync(join(other, 'hooks', 'role-guard.mjs'), `${readFileSync(join(other, 'hooks', 'role-guard.mjs'), 'utf8')}\n// edited\n`)
+    const r = await run(e, dir, { pluginRoot: other })
+    assert.equal(r.status, 'paused_infra')
+    assert.equal(r.infra.cls, 'plugin_changed')
+    assert.match(r.infra.detail, /guardSha/)
+    assert.equal(e.fake.log().filter(entry => entry.ccRsi?.CC_RSI_ROLE).length, 0, 'no role child ran on the changed code')
+  })
+
+  it('an engine whose lease was taken over stops without touching the journal or the state (memory-crash-9)', async () => {
+    const e = await engineEnv({ world: { waves: [[{ id: 'slow' }]], actors: { 'w001-slow': { hangOnce: 60000 } } } })
+    const { dir } = await create(e, { phase: 'broad', id: 'fenced', direction: 'd' })
+    const pending = run(e, dir)
+    await waitFor(async () => (await OpJournal.open(dir)).hasStart('w001/b:slow/a1/work/m1'))
+    await sleep(200)
+    // `explore resume` took the lineage over while this engine was stopped past its lease.
+    const lockFile = join(dir, 'engine.lock')
+    writeFileSync(lockFile, `${JSON.stringify({ pid: 1, host: 'other-host', token: 'other:engine', at: new Date().toISOString(), owner: { kind: 'engine' } })}\n`)
+    const sentinel = `${JSON.stringify({ status: 'running', pid: 1, by: 'the new engine' })}\n`
+    writeFileSync(join(dir, 'state.json'), sentinel)
+    const opsBefore = readFileSync(join(dir, 'ops.jsonl'), 'utf8')
+    const r = await pending
+    assert.deepEqual(r, { status: 'lock_lost', exitCode: 3 })
+    assert.equal(readFileSync(join(dir, 'ops.jsonl'), 'utf8'), opsBefore, 'no journal record after the takeover')
+    assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), sentinel, 'the new engine\'s state is untouched')
+    assert.match(readFileSync(lockFile, 'utf8'), /other:engine/)
   })
 
   it('abandons a paused lineage with the last infra detail and discards its drafts', async () => {
@@ -246,6 +290,26 @@ describe('daemon and resume', () => {
     // A third run of a completed lineage is a no-op.
     assert.equal((await run(e, dir)).status, 'completed')
     assert.equal((await storeJournal(e)).journal.length, 1)
+  })
+
+  it('a draft whose store record was lost is kept as .prev and re-applied, never wiped (memory-crash-4/-5)', async () => {
+    const e = await engineEnv({
+      world: { waves: [[{ id: 'l' }]], actors: { 'w001-l': { apiErrorAt: { marker: 'TERMINAL MEMORY RECONCILIATION', error: { status: 401, error: 'authentication_failed' } } } } },
+    })
+    const { dir } = await create(e, { phase: 'broad', id: 'lostmeta', direction: 'd' })
+    assert.equal((await run(e, dir)).status, 'paused_infra')
+    const memoryDir = e.layout('lostmeta').actorMemory('w001-l')
+    assert.ok(existsSync(join(memoryDir, 'lesson-w001-l.md')))
+    // The draft's meta is gone (written by an older version, or removed by hand); the Actor's directory survives.
+    const meta = join(e.pl.store, 'drafts', 'lostmeta-w001-l.json')
+    assert.ok(existsSync(meta), meta)
+    rmSync(meta)
+    await applyResume(dir, await admitResume(dir, { env: e.env }))
+    const second = await run(e, dir)
+    assert.equal(second.status, 'completed', JSON.stringify(second))
+    const { journal } = await storeJournal(e)
+    assert.deepEqual(journal.map(c => [c.episode, c.created]), [['lostmeta-w001-l', ['lesson-w001-l.md']]])
+    assert.ok((await protocolEvents(dir)).some(ev => ev.type === 'MEMORY_CONFLICT_REBASED'), 'the same Actor re-applied its draft')
   })
 
   it('shows contexts with --fork-session hints and never report text', async () => {

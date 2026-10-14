@@ -5,6 +5,8 @@ and blank workspace for the proposed experience inside its fixture root under
 contain at least one regular file when you end your turn, and the natural-language
 project must name <PROJECT_ROOT> as the Actor's complete project root: the harness
 replays your fixture tree there byte-for-byte, so do not rely on the authoring path.
+The harness substitutes <PROJECT_ROOT> only in the natural-language project, never inside
+fixture files: a fixture file that must refer to the root uses a relative path.
 The root must not contain your own completed implementation of the Actor Agent's
 requested deliverable. Treat it as the exact solver-visible publication set, not as
 construction scratch space. Every persistent or final Actor Agent deliverable required

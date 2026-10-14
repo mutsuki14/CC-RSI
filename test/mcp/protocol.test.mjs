@@ -4,9 +4,11 @@
 // stdout carries JSON-RPC only; under CC_RSI_ROLE every tool is an isError result; cancellation.
 
 import assert from 'node:assert/strict'
+import { cpSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { McpClient, cleanEnv } from '../interactive/harness.mjs'
-import { tmpHome } from '../_helpers/tmp.mjs'
+import { McpClient, ROOT, cleanEnv } from '../interactive/harness.mjs'
+import { tmpDir, tmpHome } from '../_helpers/tmp.mjs'
 
 async function server(extraEnv = {}) {
   const { home, env } = await tmpHome()
@@ -42,9 +44,26 @@ describe('MCP protocol over stdio', () => {
       assert.equal(missing.result.protocolVersion, '2025-11-25')
       assert.deepEqual(newer.result.capabilities, { tools: { listChanged: false } })
       assert.equal(newer.result.serverInfo.name, 'cc-rsi')
-      assert.equal(typeof newer.result.serverInfo.version, 'string')
+      // The version the CLI reports (portability-14): the plugin manifest's.
+      const manifest = JSON.parse(readFileSync(join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8'))
+      assert.equal(newer.result.serverInfo.version, manifest.version)
       assert.ok(newer.result.instructions.length <= 1500)
       assert.match(newer.result.instructions, /^cc-rsi runs an independent Verifier for your work in this project\./)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it('reports the plugin manifest\'s version after a bump, like the CLI (portability-14)', async () => {
+    const root = await tmpDir('cc-rsi-plugin-')
+    for (const part of ['lib', 'mcp', 'prompts', 'package.json', '.claude-plugin']) cpSync(join(ROOT, part), join(root, part), { recursive: true })
+    const manifestFile = join(root, '.claude-plugin', 'plugin.json')
+    writeFileSync(manifestFile, JSON.stringify({ ...JSON.parse(readFileSync(manifestFile, 'utf8')), version: '9.8.7' }))
+    const { home, env } = await tmpHome()
+    const client = new McpClient({ ...cleanEnv(env), CC_RSI_HOME: home }, { server: join(root, 'mcp', 'server.mjs') })
+    try {
+      const r = await client.request('initialize', { protocolVersion: '2025-11-25', capabilities: {} })
+      assert.equal(r.result.serverInfo.version, '9.8.7')
     } finally {
       await client.close()
     }
@@ -75,12 +94,13 @@ describe('MCP protocol over stdio', () => {
           additionalProperties: false,
         },
       })
+      // confirm is required unless abandon is true (checked by the tool, cc-integration-5).
       assert.deepEqual(byName.memory_commit.inputSchema, {
         type: 'object',
         properties: { confirm: { type: 'string', pattern: '^[0-9a-f]{6}$' }, abandon: { type: 'boolean' } },
-        required: ['confirm'],
         additionalProperties: false,
       })
+      assert.match(byName.memory_commit.description, /call learn to re-show/)
     } finally {
       await client.close()
     }
@@ -134,7 +154,6 @@ describe('MCP protocol over stdio', () => {
     try {
       await client.initialize()
       const cases = [
-        ['memory_commit', {}],
         ['memory_commit', { confirm: 'XYZ' }],
         ['memory_commit', { confirm: 'abcdef', abandon: 'yes' }],
         ['submit', { evidence_leads: 'x' }],

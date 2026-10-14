@@ -6,11 +6,25 @@ The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep
 inputs, editable project state, required project-local dependencies, and final
 deliverables inside that root and leave it nonempty. Put disposable application
 extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
-outside it (for example in a temporary directory such as /tmp), and remove any such
-debugging debris you accidentally created inside the root before your terminal
-handoff. Do not remove supplied inputs or anything required to replay the submitted
-project. Never create symbolic links or special files inside the root. The harness
-snapshots only this root; it does not judge the contents. During project work,
-/srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory is canonical read-only experience: edits to your memory directory
-during work are discarded. Only the later terminal memory-distillation phase can
-promote memory.
+outside it (for example in a temporary directory such as /tmp, which your shell commands can use but your file tools may not reach), and remove any such debugging debris you accidentally
+created inside the root before your terminal handoff. Do not remove supplied inputs
+or anything required to replay the submitted project. Never create symbolic links or
+special files inside the root. The harness snapshots only this root; it does not
+judge the contents. During project work, /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory is canonical read-only
+experience: edits to your memory directory during work are discarded. Only the later
+terminal memory-distillation phase can promote memory.
+===== scratch =====
+
+
+GENERIC RUNTIME OWNERSHIP BOUNDARY:
+The complete replayable project tree is /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/projects/p001. Keep supplied project
+inputs, editable project state, required project-local dependencies, and final
+deliverables inside that root and leave it nonempty. Put disposable application
+extractions, caches, reference-frame dumps, probes, and parameter-sweep artifacts
+outside it (in your private scratch directory /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/scratch, which your file tools and shell commands can both use and which is never part of the project), and remove any such debugging debris you accidentally
+created inside the root before your terminal handoff. Do not remove supplied inputs
+or anything required to replay the submitted project. Never create symbolic links or
+special files inside the root. The harness snapshots only this root; it does not
+judge the contents. During project work, /srv/cc/home/work/demo-0123456789ab/deep-20261013120000/actor-private/p001/memory is canonical read-only
+experience: edits to your memory directory during work are discarded. Only the later
+terminal memory-distillation phase can promote memory.

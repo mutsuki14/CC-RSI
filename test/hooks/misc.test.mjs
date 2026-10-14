@@ -2,11 +2,12 @@
 // PostModelSwitch, SessionEnd, the async rewake hook, and the exact hooks.json / .mcp.json.
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { writeJsonAtomic } from '../../lib/core/atomic.mjs'
-import { run as rewakeRun } from '../../lib/hooks/rewake.mjs'
+import { run as rewakeRun, wakeClaimPath } from '../../lib/hooks/rewake.mjs'
+import { resolveVerifierModel, transcriptModelSync } from '../../lib/interactive/session.mjs'
 import { ROOT, deadPid, fixture, hook, layouts, setupProject } from '../interactive/harness.mjs'
 
 const SUBS = ['session-start', 'prompt', 'guard', 'attest', 'rewake', 'stop', 'model', 'session-end']
@@ -26,6 +27,25 @@ describe('attest hook', () => {
     assert.equal(record.tool_name, 'mcp__plugin_cc-rsi_rsi__submit')
     assert.equal(record.agent_id, 'a1b2')
     assert.equal(record.cwd, p.repo)
+  })
+
+  it('fills the session model from the transcript first, so an inheriting Verifier gets the session model (cc-integration-3)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const { sl } = layouts(p)
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).model, null, 'the 2.1.296 SessionStart payload has no model')
+    const transcript = join(p.home, 'transcript.jsonl')
+    writeFileSync(transcript, `${'x'.repeat(300 * 1024)}\n${JSON.stringify({ type: 'assistant', message: { model: 'claude-haiku-5-5', content: [] } })}\n${JSON.stringify({ type: 'user', message: { content: 'go' } })}\n`)
+    const r = await hook('attest', fixture('pre-tool-use-mcp', p), p.env)
+    assert.equal(r.code, 0)
+    assert.equal(r.stdout, '')
+    const session = JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
+    assert.equal(session.model, 'claude-haiku-5-5')
+    assert.equal(session.modelSource, 'transcript')
+    const resolved = resolveVerifierModel({ models: { verifier: '' } }, session, { HOME: p.home })
+    assert.deepEqual(resolved, { model: 'claude-haiku-5-5', source: 'session' })
+    // A missing transcript yields no model.
+    assert.equal(transcriptModelSync(join(p.home, 'missing.jsonl')), null)
   })
 
   it('denies inside a role context and writes nothing for unusable ids', async () => {
@@ -117,9 +137,12 @@ describe('rewake hook', () => {
     const infra = await rewakeRun(payload, { env: p.env, ...opts })
     assert.equal(infra.exitCode, 2)
     assert.match(infra.stderr, /finished without a verdict \(infrastructure\)\. Call wait_verdict for details\.$/)
+    assert.deepEqual(await rewakeRun(payload, { env: p.env, ...opts }), {}, 'one wake per job')
+    rmSync(wakeClaimPath(path))
     await writeJsonAtomic(path, { ...job, status: 'running', pid: deadPid(), delivered: false })
     const dead = await rewakeRun(payload, { env: p.env, ...opts })
     assert.equal(dead.exitCode, 2)
+    rmSync(wakeClaimPath(path))
     // Unrelated tool responses and the disabled option never wait.
     assert.deepEqual(await rewakeRun(fixture('post-tool-use-mcp', p, { text: 'cc-rsi · Verifier: VERDICT: PASS' }), { env: p.env, ...opts }), {})
     const disabledEnv = { ...p.env }
@@ -127,6 +150,21 @@ describe('rewake hook', () => {
     writeFileSync(join(p.home, 'config.json'), JSON.stringify({ interactive: { rewake: false } }))
     await writeJsonAtomic(path, { ...job, status: 'done', result: { verdict: 'PASS' }, delivered: false })
     assert.deepEqual(await rewakeRun(payload, { env: disabledEnv, ...opts }), {})
+  })
+
+  it('several pollers of one job wake the session once', async () => {
+    const p = await setupProject()
+    const { id, path, job } = await jobFixture(p, {})
+    const payload = fixture('post-tool-use-mcp', p, { text: running(id) })
+    // submit → RUNNING, wait_verdict → RUNNING, wait_verdict → RUNNING: three pollers, then the turn ends.
+    const pollers = [1, 2, 3].map(() => rewakeRun(payload, { env: p.env, ...opts }))
+    setTimeout(() => { writeJsonAtomic(path, { ...job, status: 'done', result: { verdict: 'PASS' } }) }, 100)
+    const results = await Promise.all(pollers)
+    assert.equal(results.filter(r => r.exitCode === 2).length, 1, JSON.stringify(results))
+    assert.equal(results.filter(r => r.exitCode === undefined && r.stderr === undefined).length, 2)
+    assert.ok(existsSync(wakeClaimPath(path)))
+    // A late poller (another wait_verdict that answered RUNNING before the end) stays silent too.
+    assert.deepEqual(await rewakeRun(payload, { env: p.env, ...opts }), {})
   })
 
   it('through the dispatcher: exit code 2 and the stderr line', async () => {
@@ -149,7 +187,7 @@ describe('plugin wiring files', () => {
         SessionStart: [{ matcher: 'startup|resume|clear|compact|fork', hooks: [cmd('session-start', 20)] }],
         UserPromptSubmit: [{ hooks: [cmd('prompt', 15)] }],
         PreToolUse: [
-          { matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor', hooks: [cmd('guard', 10)] },
+          { matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor|CronCreate|ScheduleWakeup|RemoteTrigger', hooks: [cmd('guard', 10)] },
           { matcher: '^mcp__plugin_cc-rsi_rsi__', hooks: [cmd('attest', 10)] },
         ],
         PostToolUse: [{ matcher: '^mcp__plugin_cc-rsi_rsi__(submit|wait_verdict)$', hooks: [cmd('rewake', 7200, { asyncRewake: true })] }],

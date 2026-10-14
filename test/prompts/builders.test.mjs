@@ -161,7 +161,7 @@ test('learning builders: outcomes, owners, confirmation codes and limits', () =>
 test('Actor openings: placeholders, memory preamble, runtime contract composition', () => {
   const contract = R.actorRuntimeContract({ projectRoot: '/w/p', memoryDir: '/w/m' })
   assert.ok(contract.startsWith('\n\nGENERIC RUNTIME OWNERSHIP BOUNDARY:\n'))
-  assert.match(contract, /edits to your memory directory\nduring work are discarded/)
+  assert.match(contract, /edits to your memory directory during work are discarded/)
   const practice = R.practiceActorCharter({ instruction: 'Write <PROJECT_ROOT>/out.txt.', projectRoot: '/w/p', memoryDir: '/w/m' })
   assert.match(practice, /Write \/w\/p\/out\.txt\./)
   assert.match(practice, /\(no durable memory files yet\)/)
@@ -292,4 +292,137 @@ test('guidance: verdict header, learn hints, notes, running, infra, refusals, co
   assert.throws(() => G.guidanceCommitResult('promoted', { outcome: 'PASS', treeAfter: 'x' }), /file count/)
   assert.throws(() => G.guidanceCommitResult('weird'), PromptError)
   for (const kind of G.COMMIT_KINDS) assert.ok(typeof kind === 'string')
+})
+
+test('live Verifier mechanics never claim a restore the checkpoint does not perform (prompts-1)', () => {
+  const live = (sandbox, extra = {}) => R.verifierSystem({ location: 'live', sandbox, allowUnverified: true, ...extra })
+  // Default (the interactive checkpoint): only the files git lists are restored, and it says so.
+  for (const text of [live(false), live(true), live(false, { checkpoint: 'listed' })]) {
+    assert.match(text, /files that git tracks or would add \(outside a git repository: every file except those under node_modules, \.venv and __pycache__ directories\)/)
+    assert.match(text, /git ignores/)
+    assert.ok(!/restores every changed file[,.]/.test(text))
+  }
+  assert.match(live(false), /neither rolled back nor reported, so leave them as they are\./)
+  // Detect-only: nothing is restored, so nothing invites destructive experiments.
+  for (const text of [live(false, { checkpoint: 'detect' }), live(false, { detectOnly: true })]) {
+    assert.match(text, /NOTHING you change under the candidate root is restored\. Do not create, modify, move, or delete anything under the candidate root/)
+    assert.ok(!/restores every changed/.test(text))
+    assert.ok(!/destructive experiments/.test(text))
+    assert.match(text, /A property created only by your own test is not candidate evidence\./)
+  }
+  const sandboxDetect = live(true, { checkpoint: 'detect' })
+  assert.ok(!/restores any change/.test(sandboxDetect))
+  assert.match(sandboxDetect, /it is too large for the harness to checkpoint, so a change to it would not be restored/)
+  // Full (the engine's whole-tree copy): RSIAgent's rollback paragraph, unchanged.
+  assert.match(live(false, { checkpoint: 'full' }), /At the beginning of this inspection the harness checkpointed the candidate's files; when this inspection ends it restores every changed file, so the effects your commands have on those files do not enter the scored state\. The checkpoint covers the candidate's files only:/)
+  assert.match(live(true, { checkpoint: 'full' }), /Treat the workspace as read-only: the harness checkpoints it before your inspection and restores any change afterwards, so an effect you cause is not candidate evidence\./)
+  // A replay ignores the checkpoint coverage.
+  assert.equal(R.verifierSystem({ location: 'replay', sandbox: true, checkpoint: 'detect' }), R.verifierSystem({ location: 'replay', sandbox: true }))
+  assert.throws(() => live(false, { checkpoint: 'partial' }), /checkpoint must be one of full, listed, detect/)
+})
+
+test('a PASS/FAIL-only Verifier is not told about UNVERIFIED revisions (prompts-10)', () => {
+  const passFail = R.verifierCharter({ ...base, allowUnverified: false })
+  assert.match(passFail, /revises the candidate after a FAIL\. Each/)
+  assert.ok(!/UNVERIFIED/.test(passFail))
+  assert.match(R.verifierCharter({ ...base, allowUnverified: true }), /revises the candidate after a FAIL or UNVERIFIED\. Each/)
+  assert.match(R.verifierCharter({ ...base }), /revises the candidate after a FAIL or UNVERIFIED\. Each/)
+})
+
+test('a resumed frozen Actor keeps the frozen boundary and is promised no learning (prompts-8, protocol-7)', () => {
+  const args = { changed: true, worklog: 'log', target: 'T', projectRoot: '/r', memoryDir: '/m' }
+  for (const changed of [true, false]) {
+    const frozen = R.resumeOpening({ ...args, changed, frozen: true })
+    assert.ok(!/distillation|learn/.test(frozen), `changed=${changed}`)
+    assert.ok(!/Do not update durable memory during target work/.test(frozen))
+    assert.match(frozen, /this same context receives its report and repairs\.\n\nRUNTIME BOUNDARY:\n/)
+    assert.ok(frozen.endsWith('Durable memory is frozen: it is read-only, and edits to your memory directory\nare discarded.'))
+    assert.match(frozen, /\[MEMORY RETRIEVAL OPPORTUNITY\] The conversation or environment channel has just recovered/)
+  }
+  const learning = R.resumeOpening(args)
+  assert.match(learning, /Only the later\nterminal memory-distillation phase can promote memory\.$/)
+  assert.ok(!/RUNTIME BOUNDARY:|Durable memory is frozen/.test(learning))
+  // The frozen first opening and the frozen resume carry the same boundary paragraph.
+  const opening = R.targetActorOpening({ target: 'T', projectRoot: '/r', memoryDir: '/m', empty: true, frozen: true })
+  const boundary = opening.slice(opening.indexOf('RUNTIME BOUNDARY:'))
+  assert.ok(R.resumeOpening({ ...args, frozen: true }).endsWith(boundary))
+})
+
+test('Actor scratch: a private scratch directory is named instead of /tmp; without one the file-tool limit is stated (prompts-3)', () => {
+  const scratchDir = '/w/actor-private/t001/scratch'
+  const texts = [
+    R.actorRuntimeContract({ projectRoot: '/w/p', memoryDir: '/w/m', scratchDir }),
+    R.targetActorOpening({ target: 'T', projectRoot: '/w/p', memoryDir: '/w/m', empty: true, scratchDir }),
+    R.targetActorOpening({ target: 'T', projectRoot: '/w/p', memoryDir: '/w/m', empty: true, frozen: true, scratchDir }),
+    R.resumeOpening({ target: 'T', projectRoot: '/w/p', memoryDir: '/w/m', scratchDir }),
+    R.resumeOpening({ target: 'T', projectRoot: '/w/p', memoryDir: '/w/m', frozen: true, scratchDir }),
+  ]
+  for (const text of texts) {
+    assert.match(text, /\(in your private scratch directory \/w\/actor-private\/t001\/scratch, which your file tools and shell commands can both use and which is never part of the project\)/)
+    assert.ok(!text.includes('/tmp'))
+  }
+  for (const text of [
+    R.actorRuntimeContract({ projectRoot: '/w/p', memoryDir: '/w/m' }),
+    R.targetActorOpening({ target: 'T', projectRoot: '/w/p', memoryDir: '/w/m', empty: true, frozen: true }),
+  ]) assert.match(text, /\(for example in a temporary directory such as \/tmp, which your shell commands can use but your file tools may not reach\)/)
+  assert.throws(() => R.actorRuntimeContract({ projectRoot: '/w/p', memoryDir: '/w/m', scratchDir: ' ' }), /scratchDir/)
+  assert.match(R.engineSystem(), /render a document or page to an image file first, where your runtime boundary puts scratch files, and Read that image\./)
+})
+
+test('the Phase-1 recovery notice never claims a persistent context the restarted Curriculum lacks (prompts-9)', () => {
+  const lost = R.phase1RecoveryNotice()
+  assert.equal(R.phase1RecoveryNotice({ contextLost: true }), lost)
+  assert.ok(lost.startsWith('\n\nHARNESS RECOVERY NOTICE:\n'))
+  assert.match(lost, /your earlier conversation could not be restored: this is a fresh\nCurriculum context/)
+  assert.match(lost, /the complete prior\nwave outcomes and your private notes shown above: rebuild your hypotheses from them/)
+  assert.ok(!/same\s+persistent\s+context|recreate that proposed/.test(lost))
+  assert.match(R.phase1RecoveryNotice({ contextLost: false }), /Continue in your same\npersistent context: recreate that proposed experiment/)
+})
+
+test('a Phase-2 outcome never lists memory file names, so the none ablation stays blind (prompts-6)', () => {
+  const changes = { created: ['csv/quoted-commas-break-naive-split.md'], modified: [], deleted: [], unchanged: ['git/rebase-pitfalls.md'] }
+  const phase2 = R.outcomeText({ label: 'Phase-2 practice project p001', instruction: 'i', verdict: 'FAIL', reports: ['r'], memoryChanges: changes, diagnosis: 'd' })
+  assert.ok(!/MEMORY CHANGES|quoted-commas|rebase-pitfalls/.test(phase2))
+  assert.ok(phase2.endsWith('ACTOR LEARNING DIAGNOSIS (verbatim):\nd'))
+  const charter = R.deepCharter({ target: 't', memoryAccess: 'none', authoringRoot: '/a', latestOutcome: phase2 })
+  assert.match(charter, /not exposed to Curriculum in this run/)
+  assert.ok(!/MEMORY CHANGES|quoted-commas|rebase-pitfalls/.test(charter))
+  // Phase 1 keeps RSIAgent's MEMORY CHANGES list (phase1_wave.py:782-803).
+  assert.match(R.outcomeText({ instruction: 'i', verdict: 'PASS', reports: ['r'], memoryChanges: changes }), /MEMORY CHANGES:\n[\s\S]*quoted-commas-break-naive-split\.md/)
+})
+
+test('main-session memory texts name only tools the main session has (cc-integration-10)', () => {
+  const texts = [
+    ...['learn', 'frozen'].map(mode => R.actorProtocol({ mode, memoryViewDir: '/v' })),
+    R.memoryPreamble({ memoryDir: '/v', inventory: { lines: ['  1  a.md'], omitted: 0 } }),
+    R.memoryPreamble({ memoryDir: '/v', empty: true }),
+  ]
+  for (const text of texts) {
+    assert.ok(!/\bGrep\b|\bGlob\b/.test(text))
+  }
+  assert.match(texts[0], /Read it with your ordinary tools \(Read, or shell commands such as ls, grep and find\); there are no memory\ntools/)
+  assert.match(texts[2], /in any order, with your file\ntools or shell commands\./)
+})
+
+test('a syntax-only report rejection asks for the same report again, not a new investigation step (prompts-4)', () => {
+  const nearMiss = parseVerdict('Findings.\n- VERDICT: FAIL', { allowUnverified: true })
+  assert.equal(nearMiss.ok, false)
+  const syntax = R.verifierContinuation({ detail: nearMiss.detail, allowUnverified: true })
+  assert.match(syntax, /Your final message was NOT accepted as a report: your reply had no standalone line "VERDICT: …" outside code fences; the line "- VERDICT: FAIL" is a list item, so it does not count\. It must contain your own decision/)
+  assert.match(syntax, /Correct only the report-channel syntax and publish your complete report again as your final message; your investigation context and private scratch are unchanged\./)
+  assert.ok(!/take your next real step/.test(syntax))
+  const conflict = parseVerdict('VERDICT: PASS\nVERDICT: FAIL', { allowUnverified: false })
+  assert.match(R.verifierContinuation({ detail: conflict.detail, allowUnverified: false }), /Correct only the report-channel syntax/)
+  // No report at all, or a verdict that is not available here, still needs investigation.
+  for (const detail of [parseVerdict('Checking the parser next.').detail, parseVerdict('VERDICT: UNVERIFIED').detail, undefined, 'the harness resumed after a pause']) {
+    const text = R.verifierContinuation({ detail, allowUnverified: false })
+    assert.match(text, /take your next real step with your tools/)
+    assert.ok(!/Correct only the report-channel syntax/.test(text))
+  }
+  // The lines both continuations ask for parse.
+  for (const line of new Set(syntax.match(/VERDICT: [A-Z]+/g))) assert.ok(parseVerdict(`report\n${line}`, { allowUnverified: true }).ok, line)
+})
+
+test('engine roles hear that a refusal inside their own directories is a harness defect to report (prompts-11)', () => {
+  assert.match(R.engineSystem(), /a tool error naming a harness-private path means the boundary worked, and it is NOT evidence about the task \(core E4\)\. A refusal of a path inside a directory the harness gave you to work in is a harness defect instead: do not try to circumvent it, and report it in your final message\.$/)
 })

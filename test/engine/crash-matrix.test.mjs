@@ -1,8 +1,8 @@
 // Crash matrix (SPEC §12.1 determinism rules, J2-5, §15.3 WP6 crash-matrix row).
 //
-// For a reference broad run and a reference deep run, and for every op N of the reference (the
-// record at which op N's fn has completed but its `done` record is not yet written; with
-// CC_RSI_CRASH_MATRIX=full also every `start` record):
+// For a reference broad run, a broad run with an unscored branch restart and a reference deep run,
+// and for every op N of the reference (the record at which op N's fn has completed but its `done`
+// record is not yet written; with CC_RSI_CRASH_MATRIX=full also every `start` record):
 //   (a) the engine throws at op N,
 //   (b) the engine (with its whole process group: role children, hooks) is SIGKILLed at op N,
 //   (c) SIGKILL at op N and the workspace is mutated before resume (every file in every project
@@ -43,6 +43,12 @@ const REFERENCES = {
   deep: {
     world: { verdicts: { '*': ['FAIL'] }, deepPlan: { 1: ['STALLED'] } },
     opts: { phase: 'deep', target: 'In <PROJECT_ROOT> convert data.csv to JSON.' },
+  },
+  // A branch restarted unscored: the first Actor message crashes once, so the abandon op (archive
+  // + retry receipt) is interrupted at every record too (protocol-2).
+  'broad-retry': {
+    world: { waves: [[{ id: 'alpha', files: { 'input.txt': 'alpha\n' } }]], afterWaves: 'SATURATED', actors: { 'w001-alpha': { crashOnce: 'after-init' } } },
+    opts: { phase: 'broad', direction: 'tiny text tools' },
   },
   ...(FULL ? {
     'deep-practice': {

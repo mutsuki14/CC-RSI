@@ -5,7 +5,7 @@ submit/learn are reserved for the main Actor conversation.
 ===== role =====
 cc-rsi tools are not available inside role contexts.
 ===== learning_open =====
-A learning phase is open: finish it with memory_commit (use the code from the last stage message), or call memory_commit with abandon:true, before you submit again.
+A learning phase is open: finish it with memory_commit, or discard it, before you submit again. Call learn to re-show the current stage message and its confirmation code; memory_commit with abandon:true discards the draft without a code.
 ===== frozen =====
 Memory is frozen for test-time reuse: no learning phase exists and memory cannot change.
 ===== sealed =====
@@ -21,7 +21,7 @@ The learning phase for this verdict already ended; durable memory was not change
 ===== tamper =====
 Canonical memory changed outside a commit, so learning is refused. Ask the user to run cc-rsi memory verify in a terminal.
 ===== bad_confirm =====
-That confirmation code does not match the latest stage message. Read the latest stage instructions, act on them, and pass the code they give.
+That confirmation code does not match the latest stage message. Read the latest stage instructions, act on them, and pass the code they give. Call learn to re-show the current stage message and its confirmation code; memory_commit with abandon:true discards the draft without a code.
 ===== no_learning =====
 No learning phase is open; call learn after a terminal verdict.
 ===== unverified_not_learnable =====

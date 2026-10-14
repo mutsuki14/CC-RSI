@@ -78,6 +78,57 @@ test('rejects multi-line probes given without a fence; allows here-strings', () 
     { leads: [{ claim: 'c', probe: 'cat <<< "x" | grep -q x && echo PASS' }], problems: [] })
 })
 
+test('a fence around the pairs or a separate fenced notes block does not continue a one-line probe (protocol-4)', () => {
+  const F = '```'
+  // The whole lead block wrapped in one fence (the body after the STATUS: SUBMIT line).
+  assert.deepEqual(parseLeads(`\n${F}text\nCLAIM: out.txt holds JSON\nPROBE: python3 -c "import json;json.load(open('out.txt'))" && echo PASS\n${F}\n`), {
+    leads: [{ claim: 'out.txt holds JSON', probe: 'python3 -c "import json;json.load(open(\'out.txt\'))" && echo PASS' }],
+    problems: [],
+  })
+  assert.deepEqual(parseLeads(`${F}\nCLAIM: a\nPROBE: test -f a && echo PASS\n\nCLAIM: b\nPROBE: test -f b && echo PASS\n${F}`).leads,
+    [{ claim: 'a', probe: 'test -f a && echo PASS' }, { claim: 'b', probe: 'test -f b && echo PASS' }])
+  // An unrelated fenced block after a blank line, also after a wrapper has closed.
+  assert.deepEqual(parseLeads(`CLAIM: a\nPROBE: test -f a && echo PASS\n\n${F}\nnotes\n${F}`),
+    { leads: [{ claim: 'a', probe: 'test -f a && echo PASS' }], problems: [] })
+  assert.deepEqual(parseLeads(`${F}\nCLAIM: a\nPROBE: echo PASS\n${F}\n\nnotes\n${F}\nmore\n${F}`).problems, [])
+  // A multi-line probe inside the wrapper (nested bare fences) still parses.
+  assert.deepEqual(parseLeads(`${F}text\nCLAIM: a\nPROBE:\n${F}\necho PASS\n${F}\n${F}`),
+    { leads: [{ claim: 'a', probe: 'echo PASS' }], problems: [] })
+  assert.deepEqual(parseLeads(`${F}text\nCLAIM: a\nPROBE:\n${F}`).problems,
+    ['PROBE 1 is empty; put a multi-line probe in a fenced code block right after the PROBE: line'])
+  // A lead-in on the PROBE line followed by the real code is still rejected, never truncated.
+  const continued = /^PROBE 1 continues onto later lines; a multi-line probe goes in a fenced code block right after an empty PROBE: line$/
+  assert.match(parseLeads(`CLAIM: a\nPROBE: run this:\n${F}\ncmd\n${F}`).problems.join(), continued)
+  assert.match(parseLeads(`CLAIM: a\nPROBE: run this:\n\n${F}\ncmd\n${F}`).problems.join(), continued)
+  assert.match(parseLeads(`${F}\nCLAIM: a\nPROBE: run this:\n${F}\ncmd\n${F}\n${F}`).problems.join(), continued)
+  assert.match(parseLeads(`CLAIM: a\nPROBE: bash\n${F}sh\nset -e\ntest -f a\n${F}`).problems.join(), continued)
+})
+
+test('list markers, bold labels and an inline code span around a probe are tolerated (prompts-5)', () => {
+  const F = '```'
+  const one = [{ claim: 'a', probe: 'test -f a && echo PASS' }]
+  for (const text of [
+    '- CLAIM: a\n- PROBE: test -f a && echo PASS',
+    '* CLAIM: a\n  PROBE: test -f a && echo PASS',
+    '1. CLAIM: a\n   PROBE: test -f a && echo PASS',
+    '2) CLAIM: a\n2) PROBE: test -f a && echo PASS',
+    '**CLAIM:** a\n**PROBE:** test -f a && echo PASS',
+    '**CLAIM**: a\n__PROBE__: test -f a && echo PASS',
+    '*CLAIM: a*\n**PROBE: test -f a && echo PASS**',
+    '- **CLAIM:** a\n- **PROBE:** `test -f a && echo PASS`',
+    'CLAIM: a\nPROBE: `test -f a && echo PASS`',
+  ]) assert.deepEqual(parseLeads(text), { leads: one, problems: [] }, text)
+  // A backtick inside the span is shell syntax, not a wrapper.
+  assert.deepEqual(parseLeads('CLAIM: a\nPROBE: test "`cat a`" = x && echo PASS').leads, [{ claim: 'a', probe: 'test "`cat a`" = x && echo PASS' }])
+  assert.match(parseLeads('CLAIM: a\nPROBE: `cat <<EOF`').problems.join(), /continues onto later lines/)
+  // A fence indented under a list item loses that indentation, keeping the code's own.
+  assert.deepEqual(parseLeads(`- CLAIM: a\n- PROBE:\n  ${F}sh\n  python3 - <<EOF\n  if True:\n      print("PASS")\n  EOF\n  ${F}`).leads,
+    [{ claim: 'a', probe: 'python3 - <<EOF\nif True:\n    print("PASS")\nEOF' }])
+  // Lookalikes are not labels.
+  assert.deepEqual(parseLeads('CLAIMS: a\nPROBES: b').problems, ['your message carries no CLAIM/PROBE evidence lead'])
+  assert.deepEqual(parseLeads('CLAIM**: a\nPROBE: b').problems, ['PROBE 1 has no CLAIM line before it'])
+})
+
 test('reports unpaired lines, empty parts and handoffs without any pair', () => {
   assert.deepEqual(parseLeads('STATUS: SUBMIT\nno pairs here').problems, ['your message carries no CLAIM/PROBE evidence lead'])
   const lone = parseLeads('CLAIM: forgotten probe\nCLAIM: ok\nPROBE: true\nCLAIM: trailing')
@@ -149,4 +200,6 @@ test('the request format names the CLAIM/PROBE lines and never promises executio
   assert.match(LEADS_REQUEST_FORMAT, /^CLAIM: </)
   assert.match(LEADS_REQUEST_FORMAT, /\nPROBE: </)
   assert.match(LEADS_REQUEST_FORMAT, /does not\s+run the probes/)
+  // prompts-5: the plain-line form is stated, not only shown.
+  assert.match(LEADS_REQUEST_FORMAT, /\nStart each CLAIM: and PROBE: line with its label, as plain text \(no bullet, number or bold\) outside any code block\.\n/)
 })

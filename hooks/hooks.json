@@ -4,7 +4,7 @@
     "SessionStart": [{"matcher": "startup|resume|clear|compact|fork", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "session-start"], "timeout": 20}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "prompt"], "timeout": 15}]}],
     "PreToolUse": [
-      {"matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "guard"], "timeout": 10}]},
+      {"matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|Monitor|CronCreate|ScheduleWakeup|RemoteTrigger", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "guard"], "timeout": 10}]},
       {"matcher": "^mcp__plugin_cc-rsi_rsi__", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "attest"], "timeout": 10}]}
     ],
     "PostToolUse": [{"matcher": "^mcp__plugin_cc-rsi_rsi__(submit|wait_verdict)$", "hooks": [{"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "rewake"], "timeout": 7200, "asyncRewake": true}]}],

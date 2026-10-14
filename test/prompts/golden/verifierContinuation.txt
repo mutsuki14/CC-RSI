@@ -1,7 +1,7 @@
 ===== unverified =====
 VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
 
-No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: your reply contained conflicting VERDICT lines (PASS, FAIL). Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.
+No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. Your final message was NOT accepted as a report: your reply contained conflicting VERDICT lines (PASS, FAIL). It must contain your own decision as exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED, written as plain text on a line of its own (no list, quote or heading marker) outside quotes and code blocks. Correct only the report-channel syntax and publish your complete report again as your final message; your investigation context and private scratch are unchanged. This is not a grade. No fixed retry count applies.
 ===== pass-fail =====
 VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
 
@@ -10,3 +10,7 @@ No PASS, FAIL, or correctness judgment was inferred from the transport failure, 
 VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
 
 No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. The prior turn did not publish a usable report in your final message: the harness resumed after a pause. Continue from your last substantive checkpoint and take your next real step with your tools. When your decision is ready, end your turn with your complete report as your final message, containing exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or (only when your instructions allow it) VERDICT: UNVERIFIED outside quotes and code blocks; do not merely announce that you will do so. This is not a grade. No fixed retry count applies.
+===== syntax-near-miss =====
+VERIFIER AGENT — SAME-CONTEXT TRANSPORT RECOVERY.
+
+No PASS, FAIL, UNVERIFIED, or correctness judgment was inferred from the transport failure, and your authority over the investigation is unchanged. Your final message was NOT accepted as a report: your reply had no standalone line "VERDICT: …" outside code fences; the line "- VERDICT: FAIL" is a list item, so it does not count. It must contain your own decision as exactly one standalone line VERDICT: PASS, VERDICT: FAIL, or VERDICT: UNVERIFIED, written as plain text on a line of its own (no list, quote or heading marker) outside quotes and code blocks. Correct only the report-channel syntax and publish your complete report again as your final message; your investigation context and private scratch are unchanged. This is not a grade. No fixed retry count applies.

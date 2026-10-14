@@ -2,7 +2,9 @@
 // attestations (§11.4), workspace locks (§11.6), the memory view (§11.10), jobIsDead (§11.5).
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { projectLayout, sessionLayout } from '../../lib/core/paths.mjs'
@@ -11,10 +13,12 @@ import { sweepAttestations, takeAttestation, writeAttestation } from '../../lib/
 import { refreshView, viewInventory, viewLooksStale } from '../../lib/interactive/memview.mjs'
 import { appendRequest, isSynthetic, lastRequestSeq, readRequests, taskMessagesFor } from '../../lib/interactive/requests.mjs'
 import {
-  applyInfra, applyVerdict, emptyState, jobIsDead, learnTarget, mayOpenOnPrompt, openTask, readTask, withTask,
+  IDENTITY_STALE_MS, applyInfra, applyVerdict, emptyState, jobIsDead, learnTarget, mayOpenOnPrompt, noteVerifierSession, openTask,
+  processStartToken, readTask, sameProcess, sameTranscript, transcriptFingerprint, transcriptPaths, withTask,
 } from '../../lib/interactive/task.mjs'
 import {
-  acquireWorkspaceLock, listLocksSync, lockCovering, lockFileFor, markRestoreFailed, releaseWorkspaceLock, releaseWorkspaceLockFor,
+  acquireWorkspaceLock, forceReleaseWorkspace, listLocksSync, lockCovering, lockFileFor, markRestoreFailed, releaseWorkspaceLock,
+  releaseWorkspaceLockFor, takeOverWorkspaceLock,
 } from '../../lib/interactive/wslock.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { tmpDir } from '../_helpers/tmp.mjs'
@@ -104,6 +108,112 @@ describe('task state machine', () => {
     assert.equal(jobIsDead({ status: 'queued', pid: null, createdAt: fresh }, { pid: deadPid() }), true, 'the server-known pid counts')
     assert.equal(jobIsDead({ status: 'running', pid: 4242, host: 'another-host', heartbeatAt: fresh }), false)
     assert.equal(jobIsDead({ status: 'running', pid: 4242, host: 'another-host', heartbeatAt: old }), true)
+  })
+
+  it('jobIsDead: a live pid that is another process (pid reuse) is dead; unknown identity yields to an old heartbeat (portability-2)', () => {
+    const now = Date.now()
+    const token = processStartToken(process.pid)
+    assert.equal(typeof token, 'string')
+    assert.equal(sameProcess(process.pid, token), true)
+    assert.equal(sameProcess(process.pid, `${token.slice(0, token.indexOf(':'))}:not-this-process`), false)
+    assert.equal(sameProcess(process.pid, undefined), null)
+    const ageOld = new Date(now - 12 * 24 * 3600000).toISOString()
+    const minuteOld = new Date(now - 60000).toISOString()
+    // Same pid, recorded start token of another process: reused → dead, whatever the platform.
+    assert.equal(jobIsDead({ status: 'running', pid: process.pid, pidStart: 'linux:x:1', heartbeatAt: minuteOld }, { identityOf: () => false }), true)
+    assert.equal(jobIsDead({ status: 'running', pid: process.pid, pidStart: token, heartbeatAt: ageOld }), false, 'the same process stays alive (a laptop slept)')
+    // No /proc and no ps (identity unknown): a 12-day-old heartbeat no longer keeps it alive.
+    const unknown = () => null
+    assert.equal(jobIsDead({ status: 'running', pid: process.pid, pidStart: token, heartbeatAt: ageOld }, { identityOf: unknown }), true)
+    assert.equal(jobIsDead({ status: 'running', pid: process.pid, pidStart: token, heartbeatAt: minuteOld }, { identityOf: unknown }), false)
+    assert.equal(jobIsDead({ status: 'running', pid: process.pid, pidStart: token, heartbeatAt: new Date(now - IDENTITY_STALE_MS - 60000).toISOString() }, { identityOf: unknown }), true)
+  })
+})
+
+describe('Verifier session ids and transcripts (security-3)', () => {
+  it('verifierSessionIds is append-only, kept across tasks and folded in from older states', async () => {
+    const s = emptyState('sid')
+    assert.deepEqual(s.verifierSessionIds, [])
+    openTask(s, { requestSeq: 1 })
+    noteVerifierSession(s, 'v-1111')
+    noteVerifierSession(s, 'v-1111')
+    applyVerdict(s, { jobId: 'j1', taskSeq: 1, generation: 1, verdict: 'FAIL', reportSha: 'a', verifierSessionId: 'v-2222' })
+    applyInfra(s, { jobId: 'j2', taskSeq: 1, cls: 'timeout', transcript: { sessionId: 'v-3333', files: [] } })
+    openTask(s, { requestSeq: 2 })
+    openTask(s, { requestSeq: 3 })
+    assert.deepEqual(s.verifierSessionIds, ['v-1111', 'v-2222', 'v-3333'], 'never dropped by new tasks')
+    // A state written before the list existed: the ids of task and prevTask are folded in on read.
+    const { sl } = await session()
+    writeFileSync(sl.task, JSON.stringify({ v: 1, taskSeq: 2, task: { seq: 2, verifier: { sessionId: 'old-task-id' } }, prevTask: { seq: 1, verifier: { sessionId: 'old-prev-id' } } }))
+    assert.deepEqual((await readTask(sl)).verifierSessionIds, ['old-task-id', 'old-prev-id'])
+    const after = await withTask(sl, st => { noteVerifierSession(st, 'new-id') })
+    assert.deepEqual(after.verifierSessionIds, ['old-task-id', 'old-prev-id', 'new-id'])
+    assert.deepEqual(JSON.parse(readFileSync(sl.task, 'utf8')).verifierSessionIds, ['old-task-id', 'old-prev-id', 'new-id'])
+  })
+
+  it('verifierCandidateRoots is append-only and folded in from the task records', async () => {
+    const s = emptyState('sid')
+    assert.deepEqual(s.verifierCandidateRoots, [])
+    noteVerifierSession(s, 'v-1', '/work/a')
+    noteVerifierSession(s, 'v-2', '/work/a')
+    noteVerifierSession(s, 'v-3', '/work/b')
+    noteVerifierSession(s, 'v-4', 'relative/ignored')
+    assert.deepEqual(s.verifierCandidateRoots, ['/work/a', '/work/b'])
+    openTask(s, { requestSeq: 9 })
+    assert.deepEqual(s.verifierCandidateRoots, ['/work/a', '/work/b'], 'never dropped by a new task')
+    const { sl } = await session()
+    writeFileSync(sl.task, JSON.stringify({ v: 1, taskSeq: 2, task: { seq: 2, candidateRoot: '/r/two', verifier: { sessionId: 'v-x' } }, prevTask: { seq: 1, candidateRoot: '/r/one', verifier: { sessionId: null } } }))
+    assert.deepEqual((await readTask(sl)).verifierCandidateRoots, ['/r/two'], 'only roots a Verifier context inspected')
+  })
+
+  it('withTask never writes task.json once its session lock was taken over (memory-crash-1/-9)', async () => {
+    const { sl } = await session()
+    await withTask(sl, st => { st.taskSeq = 1 })
+    await assert.rejects(withTask(sl, st => {
+      // Another process takes the lock over while this holder runs (stopped past its lease).
+      writeFileSync(sl.lock, `${JSON.stringify({ pid: 1, host: hostname(), token: 'other:token', at: new Date().toISOString(), owner: {} })}\n`)
+      st.taskSeq = 2
+    }), error => error?.code === 'lock_lost')
+    assert.equal(JSON.parse(readFileSync(sl.task, 'utf8')).taskSeq, 1, 'the taken-over holder wrote nothing')
+    // The new holder's record is left alone.
+    assert.match(readFileSync(sl.lock, 'utf8'), /other:token/)
+  })
+
+  it('a verdict records the transcript fingerprint; infra updates it only for the task\'s current context', () => {
+    const s = emptyState('sid')
+    openTask(s, { requestSeq: 1 })
+    const fp1 = { sessionId: 'v-a', files: [{ path: '/c/projects/x/v-a.jsonl', size: 3, sha256: 'aa', link: false }] }
+    applyVerdict(s, { jobId: 'j1', taskSeq: 1, generation: 1, verdict: 'FAIL', reportSha: 'a', verifierSessionId: 'v-a', transcript: fp1 })
+    assert.deepEqual(s.task.verifier.transcript, fp1)
+    const fp2 = { sessionId: 'v-a', files: [{ path: '/c/projects/x/v-a.jsonl', size: 9, sha256: 'bb', link: false }] }
+    applyInfra(s, { jobId: 'j2', taskSeq: 1, cls: 'cancelled', transcript: fp2 })
+    assert.deepEqual(s.task.verifier.transcript, fp2, 'a job that conversed with the context records its growth')
+    applyInfra(s, { jobId: 'j3', taskSeq: 1, cls: 'cancelled', transcript: { sessionId: 'v-other', files: [] } })
+    assert.deepEqual(s.task.verifier.transcript, fp2, 'another context never overwrites it')
+    // A verdict without a matching fingerprint leaves none (an unverifiable context is not resumed).
+    applyVerdict(s, { jobId: 'j4', taskSeq: 1, generation: 2, verdict: 'PASS', reportSha: 'b', verifierSessionId: 'v-b', transcript: fp2 })
+    assert.equal(s.task.verifier.transcript, null)
+  })
+
+  it('transcriptFingerprint finds <configDir>/projects/*/<id>.jsonl and changes when the history is edited or planted', async () => {
+    const cfg = await tmpDir('cc-rsi-cfg-')
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: cfg }
+    const id = '0d6c3f0e-1111-4222-8333-444455556666'
+    assert.deepEqual(transcriptPaths(id, { env }), [])
+    const empty = await transcriptFingerprint(id, { env })
+    assert.deepEqual(empty, { sessionId: id, files: [] })
+    mkdirSync(join(cfg, 'projects', '-tmp-repo'), { recursive: true })
+    const file = join(cfg, 'projects', '-tmp-repo', `${id}.jsonl`)
+    writeFileSync(file, '{"type":"user"}\n{"type":"assistant","text":"VERDICT: FAIL"}\n')
+    const a = await transcriptFingerprint(id, { env })
+    assert.equal(a.files.length, 1)
+    assert.equal(a.files[0].path, file)
+    assert.match(a.files[0].sha256, /^[0-9a-f]{64}$/)
+    assert.equal(sameTranscript(a, await transcriptFingerprint(id, { env })), true)
+    assert.equal(sameTranscript(empty, a), false, 'a planted transcript is a change')
+    writeFileSync(file, '{"type":"user"}\n{"type":"assistant","text":"VERDICT: PASS"}\n')
+    assert.equal(sameTranscript(a, await transcriptFingerprint(id, { env })), false, 'an edit of the same size is a change')
+    assert.equal(await transcriptFingerprint('../x', { env }), null)
   })
 })
 
@@ -209,6 +319,126 @@ describe('workspace locks', () => {
     l3.stopHeartbeat()
     assert.equal(await releaseWorkspaceLockFor(locks, third, 'someone-else'), false)
     assert.equal(await releaseWorkspaceLockFor(locks, third, 'j4'), true)
+  })
+
+  it('a restore failure of a job whose lock another job holds survives that job\'s release (memory-crash-3)', async () => {
+    const locks = await tmpDir('cc-rsi-locks-')
+    const root = await tmpDir('cc-rsi-root-')
+    const lockB = await acquireWorkspaceLock(locks, root, { jobId: 'job-B', sessionId: 's2' })
+    await markRestoreFailed(locks, root, { jobId: 'job-A', sessionId: 's1' })
+    const record = JSON.parse(readFileSync(lockFileFor(locks, root), 'utf8'))
+    assert.equal(record.owner.jobId, 'job-B', 'the other job\'s record is left alone')
+    assert.equal(record.owner.restoreFailed, false)
+    await releaseWorkspaceLock(lockB)
+    const live = listLocksSync(locks).filter(l => l.root === root && l.live)
+    assert.equal(live.length, 1)
+    assert.equal(live[0].restoreFailed, true)
+    assert.equal(live[0].jobId, 'job-A', 'attributed to the job that failed')
+    assert.ok(lockCovering(listLocksSync(locks), join(root, 'f.txt')))
+    await assert.rejects(acquireWorkspaceLock(locks, root, { jobId: 'job-C' }), e => e.code === 'workspace_busy' && /failed to restore/.test(e.message))
+    // A held lock marked restore-failed gets a token no LeaseLock owns: no ordinary release removes it.
+    const other = await tmpDir('cc-rsi-root-')
+    const held = await acquireWorkspaceLock(locks, other, { jobId: 'job-D' })
+    await markRestoreFailed(locks, other, { jobId: 'job-D' })
+    await releaseWorkspaceLock(held)
+    assert.equal(listLocksSync(locks).find(l => l.root === other).restoreFailed, true)
+    assert.match(JSON.parse(readFileSync(lockFileFor(locks, other), 'utf8')).token, /^restore-failed:/)
+    // A human release removes the lock and every marker of the root.
+    assert.equal((await forceReleaseWorkspace(locks, root)).length, 1)
+    assert.equal(listLocksSync(locks).filter(l => l.root === root).length, 0)
+    const again = await acquireWorkspaceLock(locks, root, { jobId: 'job-E' })
+    await releaseWorkspaceLock(again)
+  })
+
+  it('a dead job\'s checkpoint-open lock stays live and busy until its recovery takes it over (memory-crash-2)', async () => {
+    const home = await tmpDir('cc-rsi-home-')
+    const locks = join(home, 'run', 'locks')
+    mkdirSync(locks, { recursive: true })
+    const root = await tmpDir('cc-rsi-root-')
+    const jobFile = join(home, 'projects', 'p', 'sessions', 's1', 'jobs', 'j-A.json')
+    const path = lockFileFor(locks, root)
+    writeFileSync(path, JSON.stringify({ pid: deadPid(), host: hostname(), token: 'x:y', at: new Date().toISOString(),
+      owner: { root, jobId: 'j-A', sessionId: 's1', jobFile, restoreFailed: false, checkpointOpen: true, checkpointDir: '/x' } }))
+    const past = new Date(Date.now() - 3600000)
+    utimesSync(path, past, past)
+    const [lock] = listLocksSync(locks, { now: Date.now() + 60000 })
+    assert.equal(lock.live, true, 'sticky while the checkpoint is open, whatever the pid and heartbeat say')
+    assert.equal(lock.checkpointOpen, true)
+    assert.equal(lock.recoveryPending, true)
+    assert.equal(lock.jobFile, jobFile)
+    await assert.rejects(acquireWorkspaceLock(locks, root, { jobId: 'j-B', sessionId: 's2' }), e => e.code === 'workspace_busy' && /recovery is pending/.test(e.message))
+    // Recovery of another job never restores under it; the job's own recovery takes it over.
+    assert.ok((await takeOverWorkspaceLock(locks, root, { jobId: 'j-B' })).conflict)
+    const taken = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1' })
+    assert.ok(taken.lock)
+    const record = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(record.pid, process.pid)
+    assert.equal(record.owner.recovering, true)
+    assert.equal(listLocksSync(locks)[0].recoveryPending, false, 'a live recovery is not pending')
+    await assert.rejects(acquireWorkspaceLock(locks, root, { jobId: 'j-B' }), e => e.code === 'workspace_busy')
+    await releaseWorkspaceLock(taken.lock)
+    assert.equal(listLocksSync(locks).length, 0)
+  })
+
+  it('a recovery\'s taken-over lock is fenced: it never rewrites, refreshes or removes a record another process took (memory-crash-1/-9)', async () => {
+    const home = await tmpDir('cc-rsi-home-')
+    const locks = join(home, 'run', 'locks')
+    mkdirSync(locks, { recursive: true })
+    const root = await tmpDir('cc-rsi-root-')
+    const path = lockFileFor(locks, root)
+    writeFileSync(path, JSON.stringify({ pid: deadPid(), host: hostname(), token: 'x:y', at: new Date().toISOString(),
+      owner: { root, jobId: 'j-A', sessionId: 's1', restoreFailed: false, checkpointOpen: true } }))
+    let lostCalls = 0
+    const taken = await takeOverWorkspaceLock(locks, root, { jobId: 'j-A', sessionId: 's1', onLost: () => { lostCalls++ } })
+    assert.ok(taken.lock)
+    await taken.lock.assertHeld()
+    // Another process takes the record over.
+    const foreign = JSON.stringify({ pid: 1, host: hostname(), token: 'other:token', at: new Date().toISOString(), owner: { root, jobId: 'j-C', checkpointOpen: true } })
+    writeFileSync(path, foreign)
+    await assert.rejects(taken.lock.assertHeld(), e => e.code === 'lock_lost')
+    assert.equal(taken.lock.lost, true)
+    assert.equal(lostCalls, 1)
+    await assert.rejects(taken.lock.updateOwner({ checkpointOpen: false }), e => e.code === 'lock_lost')
+    await releaseWorkspaceLock(taken.lock)
+    assert.equal(readFileSync(path, 'utf8'), foreign, 'the new holder\'s record is untouched')
+    // A job-id release removes only the exact record judged, under the takeover guard.
+    writeFileSync(path, JSON.stringify({ pid: 1, host: hostname(), token: 'a:b', at: new Date().toISOString(), owner: { root, jobId: 'j-D' } }))
+    const guard = `${path}.takeover`
+    writeFileSync(guard, '')
+    const pending = releaseWorkspaceLockFor(locks, root, 'j-D')
+    await new Promise(r => setTimeout(r, 50))
+    const replaced = JSON.stringify({ pid: 1, host: hostname(), token: 'c:d', at: new Date().toISOString(), owner: { root, jobId: 'j-D' } })
+    writeFileSync(path, replaced)
+    unlinkSync(guard)
+    assert.equal(await pending, false, 'a record replaced while the release waited is left alone')
+    assert.equal(readFileSync(path, 'utf8'), replaced)
+    assert.equal(await releaseWorkspaceLockFor(locks, root, 'j-D'), true)
+    assert.equal(existsSync(path), false)
+  })
+
+  it('a live pid that is no longer the holder\'s process does not keep a lock live (portability-2)', async () => {
+    const locks = await tmpDir('cc-rsi-locks-')
+    const root = await tmpDir('cc-rsi-root-')
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' })
+    try {
+      const path = lockFileFor(locks, root)
+      const write = pidStart => writeFileSync(path, JSON.stringify({ pid: sleeper.pid, host: hostname(), token: 'x:y', at: new Date().toISOString(),
+        owner: { root, jobId: 'j-old', sessionId: 's', restoreFailed: false, pidStart } }))
+      const old = new Date(Date.now() - 12 * 24 * 3600000)
+      write(`${processStartToken(sleeper.pid).split(':')[0]}:recorded-by-another-process`)
+      utimesSync(path, old, old)
+      assert.equal(listLocksSync(locks)[0].live, false, 'start token mismatch: the pid was reused')
+      write(processStartToken(sleeper.pid))
+      utimesSync(path, old, old)
+      assert.equal(listLocksSync(locks)[0].live, true, 'the same process keeps it live')
+      // Identity unknown (no /proc, no ps): an old heartbeat wins over a live pid.
+      assert.equal(listLocksSync(locks, { identityOf: () => null })[0].live, false)
+      const recent = new Date(Date.now() - 120000)
+      utimesSync(path, recent, recent)
+      assert.equal(listLocksSync(locks, { identityOf: () => null })[0].live, true)
+    } finally {
+      sleeper.kill('SIGKILL')
+    }
   })
 })
 

@@ -7,6 +7,9 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { writeJsonAtomic } from '../../lib/core/atomic.mjs'
 import { MemoryStore } from '../../lib/memory/store.mjs'
+import { tmpDir } from '../_helpers/tmp.mjs'
+import { MCP_OPT_PREFIX, effectiveConfig, pluginCodeFingerprint, sessionContext } from '../../lib/interactive/session.mjs'
+import { callTool } from '../../lib/mcp/tools.mjs'
 import { ROOT, deadPid, fixture, hook, layouts, setupProject, taskState, until } from '../interactive/harness.mjs'
 
 async function seedMemory(p, files) {
@@ -37,7 +40,8 @@ describe('SessionStart hook', () => {
     const { sl, g } = layouts(p)
     assert.ok(C.includes(`Your durable memory is a read-only directory: ${sl.viewDir}`))
     assert.match(C, /Current durable-memory inventory: empty \(0 files\)\./)
-    assert.match(r.json.systemMessage, /^cc-rsi: Verifier isolation = (rollback|sandbox) \(.+\); Verifier model = inherit; memory 0 files \(learn\); WARNING: Verifier model equals the session model$/)
+    // The session model is unknown at startup (no model in the 2.1.296 payload): no false warning.
+    assert.match(r.json.systemMessage, /^cc-rsi: Verifier isolation = (rollback|sandbox) \(.+\); Verifier model = inherit \(session model not yet known\); memory 0 files \(learn\)$/)
     const session = JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
     assert.equal(session.sessionId, p.sid)
     assert.equal(session.source, 'startup')
@@ -60,6 +64,64 @@ describe('SessionStart hook', () => {
     const session = JSON.parse(readFileSync(layouts(p).sl.sessionJson, 'utf8'))
     assert.equal(session.model, 'claude-sonnet-4-6')
     assert.equal(session.modelSource, 'session-start')
+    assert.deepEqual(session.pluginOptions, { verifier_model: 'opus' }, 'the saved options the hooks see')
+    // Two known, equal models still warn.
+    const same = await hook('session-start', fixture('session-start', p, { extra: { model: 'opus' } }), env)
+    assert.match(same.json.systemMessage, /Verifier model = opus; memory 0 files \(learn\); WARNING: Verifier model equals the session model$/)
+  })
+
+  it('records the plugin code fingerprint once per session (security-4)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const { sl } = layouts(p)
+    const first = JSON.parse(readFileSync(sl.sessionJson, 'utf8'))
+    assert.match(first.pluginFingerprint, /^[0-9a-f]{64}$/)
+    assert.equal(first.pluginFingerprint, pluginCodeFingerprint(ROOT))
+    assert.equal(first.codeRoot, ROOT)
+    // A compaction keeps the baseline (an edit made meanwhile must not be re-baselined).
+    await writeJsonAtomic(sl.sessionJson, { ...first, pluginFingerprint: 'f'.repeat(64) })
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'compact' } }), p.env)
+    assert.equal(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).pluginFingerprint, 'f'.repeat(64))
+    // The fingerprint covers code, hooks, bin, the MCP entry and the role prompts.
+    const tree = await tmpDir('cc-rsi-plugin-tree-')
+    for (const rel of ['lib/interactive/verify-job.mjs', 'hooks/role-guard.mjs', 'bin/cc-rsi', 'mcp/server.mjs', 'prompts/verifier-system.md', 'README.md']) {
+      mkdirSync(join(tree, rel, '..'), { recursive: true })
+      writeFileSync(join(tree, rel), 'v1\n')
+    }
+    const base = pluginCodeFingerprint(tree)
+    writeFileSync(join(tree, 'README.md'), 'docs only\n')
+    assert.equal(pluginCodeFingerprint(tree), base)
+    for (const rel of ['lib/interactive/verify-job.mjs', 'hooks/role-guard.mjs', 'prompts/verifier-system.md']) {
+      writeFileSync(join(tree, rel), 'tampered\n')
+      assert.notEqual(pluginCodeFingerprint(tree), base, rel)
+      writeFileSync(join(tree, rel), 'v1\n')
+    }
+    assert.equal(pluginCodeFingerprint(tree), base)
+  })
+
+  it('the MCP server applies the options the hooks see, not the substituted manifest defaults', async () => {
+    const p = await setupProject({ config: { isolation: { sandbox: 'require' }, interactive: { stopPolicy: 'gate' } } })
+    const r = await hook('session-start', fixture('session-start', p), p.env)
+    const banner = /^cc-rsi: Verifier isolation = (\w+) /.exec(r.json.systemMessage)[1]
+    const { sl } = layouts(p)
+    assert.deepEqual(JSON.parse(readFileSync(sl.sessionJson, 'utf8')).pluginOptions, {}, 'no option was saved')
+    // Claude Code substitutes the manifest defaults of unsaved options into the server's env.
+    const mcpEnv = { ...p.env, CC_RSI_OPT_SANDBOX: 'auto', CC_RSI_OPT_STOP_POLICY: 'nudge', CC_RSI_OPT_VERIFIER_MODEL: '' }
+    const ctx = await sessionContext({ payload: { session_id: p.sid, cwd: p.repo }, env: mcpEnv, optPrefix: MCP_OPT_PREFIX, create: false })
+    assert.equal(ctx.config.isolation.sandbox, 'require')
+    assert.equal(ctx.config.interactive.stopPolicy, 'gate')
+    assert.equal(effectiveConfig({ home: p.home, projectRoot: p.repo, env: mcpEnv, optPrefix: MCP_OPT_PREFIX, session: ctx.session }).config.isolation.sandbox, 'require')
+    // The status tool (unattested: the spawn-time session) reports what the SessionStart banner said.
+    const status = await callTool('status', {}, { env: { ...mcpEnv, CLAUDE_CODE_SESSION_ID: p.sid } })
+    const line = status.content[0].text.split('\n').find(l => l.startsWith('isolation: '))
+    assert.match(line, new RegExp(`^isolation: Verifier ${banner} \\(`))
+    // An option the user saved reaches both sides; a non-default env value the record lacks still counts.
+    const saved = { ...p.env, CLAUDE_PLUGIN_OPTION_SANDBOX: 'off' }
+    await hook('session-start', fixture('session-start', p, { extra: { source: 'resume' } }), saved)
+    const again = await sessionContext({ payload: { session_id: p.sid, cwd: p.repo }, env: { ...mcpEnv, CC_RSI_OPT_SANDBOX: 'off', CC_RSI_OPT_VERIFIER_MODEL: 'test-verifier-model' }, optPrefix: MCP_OPT_PREFIX, create: false })
+    assert.equal(again.config.isolation.sandbox, 'off')
+    assert.equal(again.config.models.verifier, 'test-verifier-model')
+    assert.equal(again.config.interactive.stopPolicy, 'gate')
   })
 
   it('lists memory files, warns about tamper, frozen mode, and live lineages', async () => {
@@ -137,5 +199,55 @@ describe('SessionStart hook', () => {
     }, { what: 'the recovery to finish' })
     assert.equal(job.infra.cls, 'job_died')
     assert.equal(taskState(p)?.job ?? null, null)
+  })
+
+  it('recovers a job of another session that died with its checkpoint open (memory-crash-2)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const other = layouts(p, '0b0b0b0b-1111-4222-8333-444444444444').sl
+    const { g } = layouts(p)
+    const jobId = 'j-20260101000000-c0ffee'
+    const jobFile = join(other.jobs, `${jobId}.json`)
+    const dead = deadPid()
+    mkdirSync(other.jobs, { recursive: true })
+    await writeJsonAtomic(jobFile, {
+      v: 1, id: jobId, status: 'running', sessionId: '0b0b0b0b-1111-4222-8333-444444444444', projectKey: layouts(p).pl.dir.split('/').pop(), taskSeq: 1, generation: 1,
+      candidateRoot: p.repo, home: p.home, verifier: { ctxKey: 'task-1-v1', sessionId: '6f1c0000-0000-4000-8000-000000000001', fresh: true }, config: {},
+      createdAt: '2026-01-01T00:00:00.000Z', startedAt: '2026-01-01T00:00:00.000Z', heartbeatAt: '2026-01-01T00:00:00.000Z', pid: dead, checkpoint: null, result: null, infra: null, delivered: false,
+    })
+    const { lockFileFor } = await import('../../lib/interactive/wslock.mjs')
+    const { hostname } = await import('node:os')
+    const lockFile = lockFileFor(g.locks, p.repo)
+    mkdirSync(g.locks, { recursive: true })
+    writeFileSync(lockFile, `${JSON.stringify({
+      pid: dead, host: hostname(), token: 'x:y', at: '2026-01-01T00:00:00.000Z',
+      owner: { root: p.repo, jobId, sessionId: '0b0b0b0b-1111-4222-8333-444444444444', jobFile, restoreFailed: false, checkpointOpen: true },
+    })}\n`)
+    // This session's SessionStart (not the dead job's own session) starts the recovery.
+    const r = await hook('session-start', fixture('session-start', p, { extra: { source: 'resume' } }), p.env)
+    assert.equal(r.code, 0)
+    const job = await until(() => {
+      const j = JSON.parse(readFileSync(jobFile, 'utf8'))
+      return j.status === 'infra' ? j : null
+    }, { what: 'the recovery of the other session\'s job' })
+    assert.equal(job.infra.cls, 'job_died')
+    await until(() => !existsSync(lockFile), { what: 'the lock release' })
+  })
+
+  it('reminds a compacted or resumed session of an open learning phase and the way back to its code (cc-integration-5)', async () => {
+    const p = await setupProject()
+    await hook('session-start', fixture('session-start', p), p.env)
+    const { sl, pl } = layouts(p)
+    const draftDir = join(pl.drafts, 'task-x-1-g1')
+    const { withTask } = await import('../../lib/interactive/task.mjs')
+    await withTask(sl, s => { s.learning = { episode: 'task-x-1-g1', taskSeq: 1, gen: 1, verdict: 'PASS', stage: 'reconcile', code: 'abcdef', draftDir } })
+    for (const source of ['compact', 'resume']) {
+      const r = await hook('session-start', fixture('session-start', p, { extra: { source } }), p.env)
+      const C = r.json.hookSpecificOutput.additionalContext
+      assert.ok(C.includes(`A cc-rsi learning phase is open (stage reconcile, draft ${draftDir}); call learn to see its current instructions and confirmation code, or memory_commit with abandon:true to discard it.`), source)
+      assert.ok(!C.includes('abcdef'), 'the code itself is never injected')
+    }
+    const fresh = await hook('session-start', fixture('session-start', p, { extra: { source: 'startup' } }), p.env)
+    assert.ok(!fresh.json.hookSpecificOutput.additionalContext.includes('learning phase is open'))
   })
 })

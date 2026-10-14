@@ -1,17 +1,19 @@
 // SPEC §15.3 WP5 hooks: the main-session PreToolUse guard — lock deny for the main thread and for an
 // `agent_id` payload, private-path deny, view/draft allow, human-only Bash deny, `explore start`
-// deny, Verifier transcripts, and the p95 < 150 ms budget for guard and attest.
+// deny, Verifier transcripts (security-3), the plugin code (security-4), an external store
+// (security-5), and the p95 < 150 ms budget for guard and attest.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { cpus, loadavg } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { acquireWorkspaceLock, markRestoreFailed, releaseWorkspaceLock } from '../../lib/interactive/wslock.mjs'
 import { withTask } from '../../lib/interactive/task.mjs'
+import { transcriptSlug } from '../../lib/hooks/guard.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
-import { tmpDir } from '../_helpers/tmp.mjs'
-import { fixture, hook, layouts, setupProject } from '../interactive/harness.mjs'
+import { shq, tmpDir } from '../_helpers/tmp.mjs'
+import { ROOT, deadPid, fixture, hook, layouts, setupProject } from '../interactive/harness.mjs'
 
 const pre = (p, tool_name, tool_input, extra = {}) => fixture('pre-tool-use', p, { extra: { tool_name, tool_input, ...extra } })
 const decision = r => r.json?.hookSpecificOutput?.permissionDecision ?? null
@@ -113,10 +115,10 @@ describe('main-session guard', () => {
     await deny(`cat ${sl.task}`, /is cc-rsi private state/)
     // <home>/bin is exec-only for shell commands: the shim runs, it is never written.
     const shim = join(p.home, 'bin', 'cc-rsi')
-    for (const ok of [`"${shim}" status`, `${shim} memory show | head -5`, 'FOO=1 $CC_RSI_HOME/bin/cc-rsi doctor']) {
+    for (const ok of [`"${shim}" status`, `${shq(shim)} memory show | head -5`, 'FOO=1 "$CC_RSI_HOME/bin/cc-rsi" doctor']) {
       assert.equal((await hook('guard', pre(p, 'Bash', { command: ok }), p.env)).json, null, ok)
     }
-    for (const bad of [`echo 'exec evil' > ${shim}`, `cp /tmp/x ${join(p.home, 'bin')}/`, `sh -c "echo > ${shim}"`, 'tee $CC_RSI_HOME/bin/cc-rsi < /tmp/x', `chmod +x ${shim}`]) {
+    for (const bad of [`echo 'exec evil' > ${shq(shim)}`, `cp /tmp/x ${shq(join(p.home, 'bin'))}/`, `sh -c "echo > '${shim}'"`, 'tee "$CC_RSI_HOME/bin/cc-rsi" < /tmp/x', `chmod +x ${shq(shim)}`]) {
       await deny(bad, /only running the cc-rsi shim is allowed/)
     }
     await deny('cat $CC_RSI_HOME/config.json', /is cc-rsi private state/)
@@ -181,5 +183,200 @@ describe('main-session guard', () => {
       if (idle) assert.ok(at(samples[sub], 0.95) < 150, detail)
       else assert.ok(at(samples[sub], 0.5) - at(samples.node, 0.5) < 100, detail)
     }
+  })
+})
+
+describe('main-session guard: Verifier transcripts, plugin code, external store', () => {
+  /** A user home whose Claude Code transcript dir holds the project's slug dir (Actor + Verifier transcripts). */
+  async function transcriptsOf(p) {
+    const userHome = await tmpDir('cc-rsi-user-home-')
+    const env = { ...p.env, HOME: userHome, CLAUDE_CONFIG_DIR: join(userHome, '.claude') }
+    const projects = join(userHome, '.claude', 'projects')
+    const slugDir = join(projects, transcriptSlug(p.repo))
+    mkdirSync(join(slugDir, 'memory'), { recursive: true })
+    mkdirSync(join(slugDir, p.sid, 'tool-results'), { recursive: true })
+    return { userHome, env, projects, slugDir }
+  }
+  const vsid = '7a9f86c9-0000-4000-8000-000000000001'
+
+  it('hides the candidate root transcript dir while the first Verifier job is in flight (security-3 a)', async () => {
+    const p = await setupProject()
+    const { sl } = await started(p)
+    const { env, projects, slugDir } = await transcriptsOf(p)
+    const read = file => hook('guard', pre(p, 'Read', { file_path: file }), env)
+    // No Verifier yet: the transcript dir is not cc-rsi's business.
+    assert.equal((await read(join(slugDir, 'other.jsonl'))).json, null)
+    // submit minted a fresh context: the id lives only in the job file until the verdict.
+    const jobId = 'j-20260101000000-abcdef'
+    mkdirSync(sl.jobs, { recursive: true })
+    writeFileSync(join(sl.jobs, `${jobId}.json`), JSON.stringify({ v: 1, id: jobId, status: 'running', sessionId: p.sid, candidateRoot: p.repo, verifier: { sessionId: vsid, fresh: true } }))
+    await withTask(sl, s => { s.job = { id: jobId, pid: process.pid, gen: 1, taskSeq: 1 }; s.task = { seq: 1, candidateRoot: p.repo, verifier: { sessionId: null }, reports: [] } })
+    const denyFile = async (tool, input, pattern = /independent Verifier transcript/) => {
+      const r = await hook('guard', pre(p, tool, input), env)
+      assert.equal(decision(r), 'deny', `${tool} ${JSON.stringify(input)}`)
+      assert.match(reason(r), pattern)
+    }
+    await denyFile('Read', { file_path: join(slugDir, `${vsid}.jsonl`) })
+    await denyFile('Read', { file_path: join(slugDir, 'any-other-session.jsonl') })
+    await denyFile('Glob', { pattern: '*.jsonl', path: slugDir })
+    await denyFile('Glob', { pattern: `${projects}/*/*.jsonl` })
+    await denyFile('Grep', { pattern: 'VERDICT', path: join(projects) })
+    // Claude Code's auto-memory and this session's own files (persisted tool results) stay readable.
+    assert.equal(decision(await read(join(slugDir, 'memory', 'MEMORY.md'))), null)
+    assert.equal(decision(await read(join(slugDir, p.sid, 'tool-results', 'out.txt'))), null)
+    assert.equal(decision(await read(join(slugDir, `${p.sid}.jsonl`))), null)
+    assert.equal(decision(await hook('guard', pre(p, 'Grep', { pattern: 'x', path: join(slugDir, 'memory') }), env)), null)
+  })
+
+  it('denies Bash reads and edits of Verifier transcripts by path, glob or ancestor (security-3 b)', async () => {
+    const p = await setupProject()
+    const { sl } = await started(p)
+    const { env, slugDir } = await transcriptsOf(p)
+    await withTask(sl, s => { s.task = { seq: 1, candidateRoot: p.repo, verifier: { sessionId: vsid }, reports: [] } })
+    const bash = command => hook('guard', pre(p, 'Bash', { command }), env)
+    for (const command of [
+      'grep -h VERDICT ~/.claude/projects/*/*.jsonl',
+      `sed -i 's/VERDICT: FAIL/VERDICT: PASS/' ${slugDir}/*.jsonl`,
+      `cat "${slugDir}"/*.jsonl`,
+      'grep -r VERDICT ~/.claude/projects',
+      'ls ~/.claude',
+      'cat $HOME/.claude/*/-tmp-*/x.jsonl',
+      `cd ${slugDir} && cat *.jsonl`,
+    ]) {
+      const r = await bash(command)
+      assert.equal(decision(r), 'deny', command)
+      assert.match(reason(r), /independent Verifier transcript/, command)
+    }
+    const fromHome = await hook('guard', pre(p, 'Bash', { command: 'cat .claude/projects/*/*.jsonl' }, { cwd: env.HOME }), env)
+    assert.equal(decision(fromHome), 'deny', 'a relative glob from the user home')
+    for (const command of [`cat ${slugDir}/memory/MEMORY.md`, `head -50 ${slugDir}/${p.sid}/tool-results/out.txt`, 'cat ~/.claude/settings.json', 'ls ~/.claude/plugins', 'git status']) {
+      assert.equal((await bash(command)).json, null, command)
+    }
+  })
+
+  it('keeps every Verifier id the session minted (verifierSessionIds), not only the current contexts (security-3 c)', async () => {
+    const p = await setupProject()
+    const { sl } = await started(p)
+    const { env, projects, slugDir } = await transcriptsOf(p)
+    const retired = '5d80e5f2-0000-4000-8000-000000000002'
+    // A restarted context dropped the old id from task.verifier; an earlier task's root differs.
+    await withTask(sl, s => { s.verifierSessionIds = [retired, vsid]; s.task = { seq: 3, candidateRoot: p.repo, verifier: { sessionId: vsid }, reports: [] }; s.prevTask = null })
+    const elsewhere = join(projects, '-tmp-old-worktree', `${retired}.jsonl`)
+    assert.match(reason(await hook('guard', pre(p, 'Read', { file_path: elsewhere }), env)), /independent Verifier transcript/)
+    assert.equal(decision(await hook('guard', pre(p, 'Bash', { command: `cat ${elsewhere}` }), env)), 'deny')
+    assert.equal(decision(await hook('guard', pre(p, 'Read', { file_path: join(slugDir, `${retired}.jsonl`) }), env)), 'deny')
+    // The list alone protects the slug dir (no current context).
+    await withTask(sl, s => { s.verifierSessionIds = [retired]; s.task = { seq: 4, candidateRoot: p.repo, verifier: { sessionId: null }, reports: [] } })
+    assert.equal(decision(await hook('guard', pre(p, 'Read', { file_path: join(slugDir, 'new.jsonl') }), env)), 'deny')
+  })
+
+  it('computes Claude Code transcript directory names', () => {
+    assert.equal(transcriptSlug('/tmp/cc-rsi-repo-Gk3B9q'), '-tmp-cc-rsi-repo-Gk3B9q')
+    assert.equal(transcriptSlug('/home/user/CC-RSI'), '-home-user-CC-RSI')
+    const long = `/tmp/${'x'.repeat(250)}`
+    const slug = transcriptSlug(long)
+    assert.equal(slug.slice(0, 201), `${long.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 200)}-`)
+    assert.match(slug.slice(201), /^[0-9a-z]+$/)
+  })
+
+  it('keeps the running plugin code read/exec-only (security-4)', async () => {
+    const p = await setupProject()
+    await started(p)
+    const deny = async (tool, input) => {
+      const r = await hook('guard', pre(p, tool, input), p.env)
+      assert.equal(decision(r), 'deny', `${tool} ${JSON.stringify(input)}`)
+      assert.match(reason(r), /is the running cc-rsi plugin code; it cannot be changed from this session/)
+    }
+    await deny('Edit', { file_path: join(ROOT, 'lib', 'interactive', 'verify-job.mjs'), old_string: 'a', new_string: 'b' })
+    await deny('Write', { file_path: join(ROOT, 'hooks', 'role-guard.mjs'), content: 'process.exit(0)' })
+    await deny('MultiEdit', { file_path: join(ROOT, 'lib', 'hooks', 'guard.mjs'), edits: [] })
+    await deny('NotebookEdit', { notebook_path: join(ROOT, 'x.ipynb'), new_source: '' })
+    for (const command of [`sed -i s/x/y/ ${ROOT}/lib/sealed/eval.mjs`, `echo 'exit 0' > ${ROOT}/bin/cc-rsi`, `cp /tmp/x ${ROOT}/lib/`, `cd ${ROOT} && git checkout -- .`]) {
+      await deny('Bash', { command })
+    }
+    // Reading and running it stay allowed.
+    assert.equal((await hook('guard', pre(p, 'Read', { file_path: join(ROOT, 'lib', 'hooks', 'guard.mjs') }), p.env)).json, null)
+    assert.equal((await hook('guard', pre(p, 'Grep', { pattern: 'x', path: join(ROOT, 'lib') }), p.env)).json, null)
+    for (const command of [`node "${ROOT}/bin/cc-rsi" status --session ${p.sid}`, `${ROOT}/bin/cc-rsi memory show`]) {
+      assert.equal((await hook('guard', pre(p, 'Bash', { command }), p.env)).json, null, command)
+    }
+    // CLAUDE_PLUGIN_ROOT may spell it through a link.
+    const linkDir = await tmpDir('cc-rsi-plugin-link-')
+    const link = join(linkDir, 'cc-rsi')
+    symlinkSync(ROOT, link)
+    const env = { ...p.env, CLAUDE_PLUGIN_ROOT: link }
+    assert.equal(decision(await hook('guard', pre(p, 'Write', { file_path: join(link, 'lib', 'x.mjs'), content: '' }), env)), 'deny')
+    assert.equal(decision(await hook('guard', pre(p, 'Bash', { command: `rm ${shq(join(link, 'hooks', 'role-guard.mjs'))}` }), env)), 'deny')
+    // Developing cc-rsi itself (the project is the checkout): not enforced.
+    const dev = { ...p.env, CLAUDE_PROJECT_DIR: ROOT }
+    assert.equal((await hook('guard', pre(p, 'Edit', { file_path: join(ROOT, 'lib', 'hooks', 'guard.mjs'), old_string: 'a', new_string: 'b' }, { cwd: ROOT }), dev)).json, null)
+  })
+
+  it('keeps an external memory store (memory.dir) private like <home> (security-5)', async () => {
+    const store = await tmpDir('cc-rsi-store-')
+    const p = await setupProject({ config: { memory: { dir: store } } })
+    await started(p)
+    assert.ok(existsSync(join(store, 'memory')), 'SessionStart opened the external store')
+    const deny = async (tool, input, env = p.env, extra = {}) => {
+      const r = await hook('guard', pre(p, tool, input, extra), env)
+      assert.equal(decision(r), 'deny', `${tool} ${JSON.stringify(input)}`)
+      return reason(r)
+    }
+    assert.match(await deny('Write', { file_path: join(store, 'memory', 'planted.md'), content: 'x' }), /is cc-rsi private state/)
+    await deny('Edit', { file_path: join(store, 'journal.jsonl'), old_string: 'a', new_string: 'b' })
+    await deny('Read', { file_path: join(store, 'reports', 'abc.md') })
+    await deny('Grep', { pattern: 'PASS', path: dirname(store) })
+    assert.match(await deny('Bash', { command: `rm ${store}/frozen.json ${store}/sealed.json` }), /is cc-rsi private state/)
+    // An unknown session (no session state) is covered through the global config.
+    await deny('Read', { file_path: join(store, 'reports', 'abc.md') }, p.env, { session_id: undefined })
+    // The read-only view (under <home>) is still the way to read memory.
+    assert.equal(decision(await hook('guard', pre(p, 'Read', { file_path: join(layouts(p).sl.viewDir, 'INDEX.md') }), p.env)), 'allow')
+  })
+
+  it('gives Bash tree walks rooted above <home> the search reason, and globs into it the private reason (security-6)', async () => {
+    const p = await setupProject()
+    await started(p)
+    const above = dirname(p.home)
+    const bash = async (command, extra = {}) => hook('guard', pre(p, 'Bash', { command }, extra), p.env)
+    for (const command of [`grep -rn VERDICT ${shq(above)}`, `find ${shq(above)} -name task.json`, 'cd .. && grep -r VERDICT .']) {
+      const r = await bash(command, command.startsWith('cd') ? { cwd: join(above, 'x') } : {})
+      assert.equal(decision(r), 'deny', command)
+      assert.equal(reason(r), 'narrow the search path; it covers cc-rsi private state', command)
+    }
+    const glob = await bash(`cat ${shq(p.home.slice(0, -2))}*/projects/*/sessions/*/task.json`)
+    assert.equal(decision(glob), 'deny')
+    assert.match(reason(glob), /is cc-rsi private state; it is not part of your task\.$/)
+    // Narrow walks stay allowed.
+    assert.equal((await bash(`grep -rn x ${shq(p.repo)}`)).json, null)
+  })
+
+  it('denies explore start/resume with options before the subcommand', async () => {
+    const p = await setupProject()
+    await started(p)
+    for (const command of ['cc-rsi explore --yes start --phase broad', 'cc-rsi explore --report-exit resume deep-1', 'node /x/bin/cc-rsi explore --json start']) {
+      const r = await hook('guard', pre(p, 'Bash', { command }), p.env)
+      assert.equal(decision(r), 'deny', command)
+      assert.match(reason(r), /human-only/, command)
+    }
+    assert.equal((await hook('guard', pre(p, 'Bash', { command: 'cc-rsi explore --report-exit status' }), p.env)).json, null)
+  })
+
+  it('starts the recovery of a job that died with its checkpoint open and explains the wait (memory-crash-2)', async () => {
+    const p = await setupProject()
+    const { g, sl } = await started(p)
+    const jobFile = join(sl.jobs, 'j-20260101000000-dead01.json')
+    mkdirSync(g.locks, { recursive: true })
+    const { lockFileFor } = await import('../../lib/interactive/wslock.mjs')
+    const { hostname } = await import('node:os')
+    const pid = deadPid()
+    writeFileSync(lockFileFor(g.locks, p.repo), `${JSON.stringify({
+      pid, host: hostname(), token: 'x:y', at: new Date().toISOString(),
+      owner: { root: p.repo, jobId: 'j-20260101000000-dead01', sessionId: p.sid, jobFile, restoreFailed: false, checkpointOpen: true },
+    })}\n`)
+    const r = await hook('guard', pre(p, 'Bash', { command: 'ls' }), p.env)
+    assert.equal(decision(r), 'deny')
+    assert.match(reason(r), /^cc-rsi: a verification job \(job j-20260101000000-dead01\) ended without restoring its checkpoint of this workspace; its recovery is running, retry shortly/)
+    // The recovery was spawned (its log file is opened by the spawn).
+    assert.ok(existsSync(jobFile.replace(/\.json$/, '.log')), 'the guard spawned the job recovery')
   })
 })

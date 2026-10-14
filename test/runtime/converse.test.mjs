@@ -87,6 +87,24 @@ test('truncation is continued with the truncation text and not counted as action
   assert.deepEqual(r.sent.slice(1).map(s => s.message), ['CONTINUE FROM THE CUT', 'CONTINUE FROM THE CUT', 'CONTINUE FROM THE CUT', 'CONTINUE FROM THE CUT'])
 })
 
+test('a truncated reply that ran tools resets the actionless counter (RSIAgent resets on any action)', async () => {
+  const r = role([{ actions: 0 }, { actions: 0 }, { actions: 5, truncated: true }, { actions: 0 }, { text: 'STATUS: SUBMIT', actions: 0 }])
+  const out = await converse({ first: 'go', send: r.send, parse: parseToken, continuation: cont, truncatedContinuation: 'CUT', policy: { actionlessLimit: 3 } })
+  assert.equal(out.index, 5)
+  assert.equal(r.sent[3].message, 'CUT')
+})
+
+test('a truncated actionless reply neither counts nor resets the actionless counter', async () => {
+  const r = role([{ actions: 0 }, { actions: 0 }, { actions: 0, truncated: true }, { actions: 0 }, { text: 'STATUS: SUBMIT' }])
+  await assert.rejects(converse({ first: 'go', send: r.send, parse: parseToken, continuation: cont, truncatedContinuation: 'CUT', policy: { actionlessLimit: 3 } }), err => {
+    assert.equal(err.cls, 'transport_liveness')
+    assert.equal(err.extra.livenessKey, 'liveness@4')
+    assert.match(err.detail, /3 consecutive actionless segments/)
+    return true
+  })
+  assert.equal(r.sent.length, 4)
+})
+
 test('a model that always truncates is still bounded by the ceiling', async () => {
   const r = role([{ truncated: true }])
   await assert.rejects(converse({ first: 'go', send: r.send, parse: parseToken, continuation: cont, truncatedContinuation: 'T', policy: { ceiling: 6 } }), TransportInfraError)

@@ -5,7 +5,7 @@
 // and the Actor memory hidden from (and deleted before) every inspection.
 
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { admitResume, applyResume } from '../../lib/engine/records.mjs'
@@ -69,7 +69,7 @@ describe('broad lineage', () => {
       assert.equal(o.actorMemoryExists, false)
       assert.equal(o.candidateHasMemoryDir, false)
       assert.equal(o.unverifiedAllowed, false) // Phase-1 Verifiers answer PASS/FAIL only
-      assert.match(o.cwd, /\/verify\/w00\d-[a-z]+\/candidate$/)
+      assert.equal(o.cwd, layout.projectRoot(o.ep)) // the replay sits at the Actor's own root (prompts-2)
     }
     const types = (await protocolEvents(dir)).map(ev => ev.type)
     assert.equal(types.filter(t => t === 'WAVE_COMPLETED').length, 2)
@@ -134,6 +134,103 @@ describe('broad lineage', () => {
     assert.deepEqual(journal.map(c => c.episode), ['retry-w001-good', 'retry-w001-flaky'])
   })
 
+  describe('an abandon interrupted after it started (protocol-2)', () => {
+    const retryWorld = { waves: [wave('alpha')], afterWaves: 'SATURATED', actors: { 'w001-alpha': { crashOnce: 'after-init' } } }
+    const ABANDON = 'w001/b:alpha/a1/abandon'
+    const opsOf = dir => readFileSync(join(dir, 'ops.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+    let reference = null
+
+    async function referenceRun() {
+      if (reference) return reference
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      assert.equal((await run(e, dir)).status, 'completed')
+      const records = opsOf(dir).filter(r => r.key === ABANDON)
+      reference = {
+        result: readJson(join(dir, 'result.json')),
+        startSeq: records.find(r => r.status === 'start').seq,
+        doneSeq: records.find(r => r.status === 'done').seq,
+      }
+      return reference
+    }
+
+    async function resumeToEnd(e, dir) {
+      const admission = await admitResume(dir, { env: e.env })
+      assert.equal(admission.ok, true, admission.reasons.join('; '))
+      await applyResume(dir, admission)
+      return run(e, dir)
+    }
+
+    async function assertCompletedLikeReference(e, dir, ref) {
+      const result = readJson(join(dir, 'result.json'))
+      assert.equal(result.termination, ref.result.termination)
+      assert.deepEqual(result.projects.map(p => [p.id, p.episode, p.verdict]), [['alpha', 'ab-w001-alpha', 'PASS']])
+      assert.deepEqual((await storeJournal(e)).journal.map(c => c.episode), ['ab-w001-alpha'])
+      const priv = join(e.layout('ab').priv, 'w001', 'projects', 'alpha')
+      assert.deepEqual(readdirSync(join(priv, 'infra_attempts')).sort(), ['a1.retry_receipt.json', 'attempt_001'])
+      assert.equal(existsSync(e.layout('ab').projectRoot('w001-alpha')), false) // archived, never re-entered
+      assert.ok(existsSync(join(e.layout('ab').projectRoot('w001-alpha-a2'), 'out.txt')))
+      assert.equal(opsOf(dir).filter(r => r.key === ABANDON && r.status === 'done').length, 1)
+      return readJson(join(priv, 'infra_attempts', 'a1.retry_receipt.json'))
+    }
+
+    it('completes the abandon on resume when the engine died before its done record', async () => {
+      const ref = await referenceRun()
+      assert.equal(ref.result.termination, 'saturated')
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      const first = await run(e, dir, { fault: `${ref.doneSeq}:throw` })
+      assert.equal(first.status, 'paused_infra')
+      const second = await resumeToEnd(e, dir)
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const receipt = await assertCompletedLikeReference(e, dir, ref)
+      assert.equal(receipt.cls, 'crash') // written by the interrupted run, kept by the recovery
+    })
+
+    it('completes the abandon on resume when the engine died right after its start record', async () => {
+      const ref = await referenceRun()
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      const first = await run(e, dir, { fault: `${ref.startSeq}:throw:after` })
+      assert.equal(first.status, 'paused_infra')
+      assert.ok(existsSync(e.layout('ab').projectRoot('w001-alpha'))) // nothing was moved yet
+      const second = await resumeToEnd(e, dir)
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const receipt = await assertCompletedLikeReference(e, dir, ref)
+      assert.equal(receipt.cls, null) // the abandoning error is gone; the receipt says so
+    })
+
+    it('completes the abandon on resume when writing the retry receipt failed once', async () => {
+      const ref = await referenceRun()
+      const e = await engineEnv({ world: retryWorld })
+      const { dir } = await create(e, { phase: 'broad', id: 'ab', direction: 'd' })
+      // The receipt path is a non-empty directory: the atomic rename onto it fails (after the move).
+      const blocker = join(e.layout('ab').priv, 'w001', 'projects', 'alpha', 'infra_attempts', 'a1.retry_receipt.json')
+      mkdirSync(join(blocker, 'x'), { recursive: true })
+      const first = await run(e, dir)
+      assert.equal(first.status, 'paused_infra')
+      assert.equal(existsSync(e.layout('ab').projectRoot('w001-alpha')), false) // moved aside before the failure
+      rmSync(blocker, { recursive: true, force: true })
+      const second = await resumeToEnd(e, dir)
+      assert.equal(second.status, 'completed', JSON.stringify(second.infra))
+      const receipt = await assertCompletedLikeReference(e, dir, ref)
+      assert.equal(receipt.attempt, 1)
+    })
+  })
+
+  it('puts the Actor tree back before archiving an attempt whose Verifier crashed mid-inspection', async () => {
+    const e = await engineEnv({ world: { waves: [wave('v')], afterWaves: 'SATURATED', verifierCrashOnce: ['w001-v'] } })
+    const { dir } = await create(e, { phase: 'broad', id: 'vc', direction: 'd' })
+    const r = await run(e, dir)
+    assert.equal(r.status, 'completed', JSON.stringify(r.infra))
+    const priv = join(e.layout('vc').priv, 'w001', 'projects', 'v')
+    assert.equal(readJson(join(priv, 'infra_attempts', 'a1.retry_receipt.json')).cls, 'crash')
+    assert.ok(existsSync(join(priv, 'infra_attempts', 'attempt_001', 'out.txt')))
+    assert.deepEqual(readdirSync(join(priv, 'a1')).filter(name => name.startsWith('actor-root-')), []) // nothing left aside
+    assert.equal(existsSync(e.layout('vc').projectRoot('w001-v')), false)
+    assert.deepEqual(readJson(join(dir, 'result.json')).projects.map(p => [p.id, p.verdict]), [['v', 'PASS']])
+  })
+
   it('blocks the whole wave on non-retryable infra (no commits), pauses, and completes after resume', async () => {
     const e = await engineEnv({ world: { waves: [wave('good', 'broken')], actors: { 'w001-broken': { apiErrorOnce: { status: 401, error: 'authentication_failed' } } } } })
     const { dir } = await create(e, { phase: 'broad', id: 'barrier', direction: 'd' })
@@ -193,6 +290,34 @@ describe('broad lineage', () => {
     const layout = e.layout('effects')
     const manifest = readJson(join(layout.priv, 'w001', 'projects', 'm', 'a1', 'candidate-g001', 'manifest.json'))
     assert.deepEqual(Object.keys(manifest.files).sort(), ['input.txt', 'out.txt'])
+    // The replay at the Actor's root is discarded: the Actor's own tree is back, without the effect.
+    assert.equal(existsSync(join(layout.projectRoot('w001-m'), 'tampered-by-verifier.txt')), false)
+    assert.equal(readFileSync(join(layout.projectRoot('w001-m'), 'out.txt'), 'utf8'), 'result for w001-m\n')
+    assert.equal(existsSync(join(layout.priv, 'w001', 'projects', 'm', 'a1', 'actor-root-g001')), false)
+  })
+
+  it('verifies a practice candidate at the same absolute root the Actor used (prompts-2)', async () => {
+    const e = await engineEnv({ world: { waves: [wave('cfg')], afterWaves: 'SATURATED', actors: { 'w001-cfg': { absoluteConfig: true } } } })
+    const { dir } = await create(e, { phase: 'broad', id: 'reloc', direction: 'd' })
+    const r = await run(e, dir)
+    assert.equal(r.status, 'completed')
+    const layout = e.layout('reloc')
+    const root = layout.projectRoot('w001-cfg')
+    const [o] = e.observations().filter(x => x.kind === 'inspect')
+    assert.equal(o.cwd, root)
+    assert.equal(o.root, root) // CANDIDATE ROOT in the charter
+    assert.equal(o.configDataDir, join(root, 'data')) // the Actor's absolute path resolves inside the candidate
+    assert.equal(o.configDataDirExists, true)
+    const verifierPrompts = await sessionPrompts(e, dir, 'w001/b:cfg/a1/verifier')
+    assert.match(verifierPrompts[0], new RegExp(`In ${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} transform input\\.txt`))
+    // The Verifier's probe of that absolute path was not refused as a harness-private path.
+    const verifierRuns = invocations(e, 'verifier')
+    assert.equal(verifierRuns.length, 1)
+    assert.ok(verifierRuns[0].hooksRun.filter(h => h.event === 'PreToolUse').length >= 2)
+    assert.ok(verifierRuns[0].hooksRun.every(h => h.decision !== 'deny'), JSON.stringify(verifierRuns[0].hooksRun))
+    // After the inspection the Actor's own tree (with its config) is back and learning ran in it.
+    assert.equal(readFileSync(join(root, 'config.ini'), 'utf8'), `data_dir=${join(root, 'data')}\n`)
+    assert.deepEqual((await storeJournal(e)).journal.map(c => c.episode), ['reloc-w001-cfg'])
   })
 
   it('restarts a Curriculum whose first message crashed before init with a new uuid (R3, never R4)', async () => {

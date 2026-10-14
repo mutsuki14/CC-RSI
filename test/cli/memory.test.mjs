@@ -3,7 +3,7 @@
 // MemoryStore (memory changes only through commits).
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { main } from '../../lib/cli/main.mjs'
@@ -113,6 +113,26 @@ describe('cc-rsi memory', () => {
     }
   })
 
+  it('a tampered frozen memory names the remedy that works while frozen, never --accept-external (memory-crash-8)', async () => {
+    const s = await setup()
+    await commitFile(s, 'ep-1', 'a.md', 'one\n')
+    assert.equal((await s.run(['memory', 'freeze'])).code, 0)
+    const memoryDir = join(s.pl.store, 'memory')
+    chmodSync(memoryDir, 0o700)
+    writeFileSync(join(memoryDir, 'planted.md'), 'planted\n')
+    const v = await s.run(['memory', 'verify'])
+    assert.equal(v.code, 1)
+    assert.match(v.stdout, /CHANGED OUTSIDE A COMMIT/)
+    assert.match(v.stdout, /remedy \(human-only, in a terminal\): cc-rsi memory restore 1 \(reinstates the frozen tree/)
+    assert.doesNotMatch(v.stdout, /--accept-external/)
+    // The named remedy works while frozen.
+    const restored = await s.run(['memory', 'restore', '1'])
+    assert.equal(restored.code, 0, restored.stdout + restored.stderr)
+    const again = await s.run(['memory', 'verify'])
+    assert.equal(again.code, 0, again.stdout)
+    assert.match(again.stdout, /frozen at tree [0-9a-f]{64} .*\(intact\)/)
+  })
+
   it('freezes, refuses unfreeze while sealed without --after-sealed, and reopens learning with it', async () => {
     const s = await setup()
     await commitFile(s, 'ep-1', 'a.md', 'one\n')
@@ -182,6 +202,9 @@ describe('cc-rsi memory', () => {
     await store.openDraft('task-idle', { owner: { kind: 'session', sessionId: 'sess-idle' } })
     await store.openDraft('task-open', { owner: { kind: 'session', sessionId: 'sess-open' } })
     await store.openDraft('lineage-ep', { owner: { kind: 'engine', pid: process.pid, lineage: 'deep-1' } })
+    // A paused lineage's draft whose directory is momentarily missing is kept too (memory-crash-4/-5).
+    const gone = await store.openDraft('lineage-gone', { owner: { kind: 'engine', pid: process.pid, lineage: 'deep-2' } })
+    rmSync(gone.dir, { recursive: true, force: true })
     await store.close()
     const list = await s.run(['memory', 'drafts'])
     assert.match(list.stdout, /^task-idle {2}session sess-idle {2}live/m)
@@ -191,9 +214,10 @@ describe('cc-rsi memory', () => {
     assert.match(pruned.stdout, /^pruned task-idle/m)
     assert.match(pruned.stdout, /^task-open .* kept: session sess-open has this learning phase open/m)
     assert.match(pruned.stdout, /^lineage-ep .* kept: lineage deep-1 may resume it/m)
+    assert.match(pruned.stdout, /^lineage-gone .*dir missing.* kept: lineage deep-2 may resume it/m)
     const after = await s.store()
     try {
-      assert.deepEqual((await after.drafts()).map(d => d.episode), ['lineage-ep', 'task-open'])
+      assert.deepEqual((await after.drafts()).map(d => d.episode), ['lineage-ep', 'lineage-gone', 'task-open'])
     } finally {
       await after.close()
     }

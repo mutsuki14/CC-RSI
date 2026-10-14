@@ -3,11 +3,12 @@
 // any side effect; usage errors → exit 2.
 
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
-import { main, parseArgs, VERSION } from '../../lib/cli/main.mjs'
+import { main, parseArgs, pluginUserConfig, savedPluginOptions, shellQuote, VERSION } from '../../lib/cli/main.mjs'
+import { writeShim } from '../../lib/cli/shim.mjs'
 import { UsageError } from '../../lib/core/errors.mjs'
 import { runNode } from '../_helpers/spawn.mjs'
 import { gitRepo, tmpDir, tmpHome } from '../_helpers/tmp.mjs'
@@ -113,7 +114,10 @@ describe('cc-rsi main', () => {
     for (const argv of cases) {
       const c = capture({ env, cwd: repo })
       assert.equal(await main(argv, c.io), 65, argv.join(' '))
-      assert.match(c.err(), /^cc-rsi: ".+" is human-only: run it in a terminal outside Claude Code\n$/, argv.join(' '))
+      // portability-6: the refusal names a command the user can run in a terminal (no shim yet: node + the bin).
+      const runnable = `node ${shellQuote(join(ROOT, 'bin', 'cc-rsi'))} ${argv.map(shellQuote).join(' ')}`
+      assert.equal(c.err(), `${c.err().split('\n')[0]}\nin a terminal, run: ${runnable}\n`, argv.join(' '))
+      assert.match(c.err(), /^cc-rsi: ".+" is human-only: run it in a terminal outside Claude Code\n/, argv.join(' '))
     }
     // Nothing was created under the home by a refused command.
     assert.deepEqual(readdirSync(home).filter(n => n !== 'logs'), [])
@@ -136,9 +140,97 @@ describe('cc-rsi main', () => {
     assert.equal(existsSync(join(env.CC_RSI_HOME, 'projects')), false)
   })
 
+  it('a human-only refusal names the terminal shim once SessionStart wrote it (portability-6)', async () => {
+    const { env, home } = await hermeticEnv({ CLAUDECODE: '1' })
+    const repo = await gitRepo({ 'a.txt': 'a\n' })
+    await writeShim(home, ROOT)
+    const c = capture({ env, cwd: repo })
+    assert.equal(await main(['memory', 'unfreeze', '--after-sealed'], c.io), 65)
+    assert.ok(c.err().endsWith(`\nin a terminal, run: ${shellQuote(join(home, 'bin', 'cc-rsi'))} memory unfreeze --after-sealed\n`), c.err())
+  })
+
+  it('--report-exit prints the exit status in-band and exits 0 (cc-integration-4)', async () => {
+    const { env, home } = await hermeticEnv()
+    const repo = await gitRepo({ 'a.txt': 'a\n' })
+    // A usage error (2), a human-only refusal (65) and success (0), each reported as the last stdout line.
+    const usage = capture({ env, cwd: repo })
+    assert.equal(await main(['memory', '--report-exit', 'frobnicate'], usage.io), 0)
+    assert.match(usage.out(), /\[cc-rsi exit 2\]\n$/)
+    const human = capture({ env: { ...env, CLAUDECODE: '1' }, cwd: repo })
+    assert.equal(await main(['memory', 'unfreeze', '--report-exit'], human.io), 0)
+    assert.match(human.out(), /^\[cc-rsi exit 65\]\n$/)
+    assert.match(human.err(), /is human-only/)
+    assert.doesNotMatch(human.err(), /--report-exit/, 'the runnable command omits the flag')
+    const ok = capture({ env, cwd: home })
+    assert.equal(await main(['version', '--report-exit'], ok.io), 0)
+    assert.match(ok.out(), /^cc-rsi .*\n\[cc-rsi exit 0\]\n$/)
+    // Without the flag the real code is returned; the command word is never taken as the flag.
+    assert.equal(await main(['memory', 'frobnicate'], capture({ env, cwd: repo }).io), 2)
+    assert.equal(await main(['--report-exit', 'version'], capture({ env, cwd: home }).io), 2)
+    // After `--` it is an argument, not the flag.
+    const after = capture({ env, cwd: home })
+    assert.equal(await main(['engine', '--', '--report-exit'], after.io), 2)
+    assert.doesNotMatch(after.out(), /cc-rsi exit/)
+  })
+
   it('engine run needs a lineage directory', async () => {
     const { env, home } = await hermeticEnv()
     const c = capture({ env, cwd: home })
     assert.equal(await main(['engine'], c.io), 2)
+  })
+})
+
+describe('saved plugin options (portability-3)', () => {
+  /** A Claude Code config dir whose user settings hold `pluginConfigs`. */
+  async function configDir(pluginConfigs) {
+    const dir = await tmpDir('cc-rsi-claude-config-')
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ model: 'opus', pluginConfigs }))
+    return dir
+  }
+
+  it('reads the cc-rsi entry of Claude Code user settings; the installing marketplace wins; require always applies', async () => {
+    const dir = await configDir({
+      'cc-rsi@inline': { options: { sandbox: 'off', verifier_model: 'haiku', stop_policy: 'gate', api_token: 'x' } },
+      'cc-rsi@mkt': { options: { sandbox: 'auto', verifier_model: 'sonnet' } },
+      'other@mkt': { options: { sandbox: 'require' } },
+    })
+    const env = { CLAUDE_CONFIG_DIR: dir }
+    assert.deepEqual(savedPluginOptions(env, { pluginRoot: '/srv/cc-rsi' }).options, { sandbox: 'off', verifier_model: 'haiku', stop_policy: 'gate' })
+    const cached = savedPluginOptions(env, { pluginRoot: join(dir, 'plugins', 'cache', 'mkt', 'cc-rsi', '0.1.0') })
+    assert.deepEqual(cached.options, { sandbox: 'auto', verifier_model: 'sonnet' })
+    assert.equal(cached.source, `${join(dir, 'settings.json')} pluginConfigs["cc-rsi@mkt"]`)
+    const strict = await configDir({ 'cc-rsi@a': { options: { sandbox: 'require' } }, 'cc-rsi@b': { options: { verifier_model: 'opus' } } })
+    assert.deepEqual(savedPluginOptions({ CLAUDE_CONFIG_DIR: strict }, { pluginRoot: '/srv/cc-rsi' }).options, { sandbox: 'require' })
+    assert.deepEqual(savedPluginOptions({ CLAUDE_CONFIG_DIR: await tmpDir() }).options, {})
+    // CLAUDE_PLUGIN_OPTION_* (hook processes) overrides the saved value.
+    const only = await configDir({ 'cc-rsi@inline': { options: { verifier_model: 'haiku' } } })
+    assert.deepEqual(pluginUserConfig({ CLAUDE_CONFIG_DIR: only, CLAUDE_PLUGIN_OPTION_VERIFIER_MODEL: 'opus' }).options.verifier_model, 'opus')
+  })
+
+  it('a saved sandbox=require blocks lineages even with --allow-unconfined, and doctor uses the saved verifier_model', async () => {
+    const { env, home } = await hermeticEnv()
+    env.CLAUDE_CONFIG_DIR = await configDir({ 'cc-rsi@inline': { options: { sandbox: 'require', verifier_model: 'saved-verifier-model' } } })
+    // No OS sandbox anywhere: an empty PATH hides bwrap and socat.
+    env.PATH = await tmpDir('cc-rsi-empty-path-')
+    const repo = await gitRepo({ 'a.txt': 'a\n' })
+    writeFileSync(join(repo, 'ideas.md'), 'write a haiku file\n')
+    let records = null
+    try {
+      records = await import('../../lib/engine/records.mjs')
+    } catch {
+      records = null
+    }
+    if (records?.preflight && process.platform !== 'darwin') {
+      const c = capture({ env, cwd: repo })
+      const code = await main(['explore', 'preflight', '--phase', 'broad', '--direction-file', 'ideas.md', '--allow-unconfined', '--skip-auth-probe'], c.io)
+      assert.equal(code, 3, c.out() + c.err())
+      assert.match(c.out(), /BLOCKERS:[\s\S]*required \(isolation\.sandbox=require\)/)
+    }
+    const { projectContext } = await import('../../lib/cli/main.mjs')
+    const ctx = await projectContext({ env, cwd: repo })
+    assert.equal(ctx.config.models.verifier, 'saved-verifier-model')
+    assert.equal(ctx.config.isolation.sandbox, 'require')
+    assert.equal(ctx.sources['isolation.sandbox'], 'userConfig')
+    assert.ok(existsSync(home))
   })
 })

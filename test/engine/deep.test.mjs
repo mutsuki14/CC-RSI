@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { OpJournal } from '../../lib/engine/journal.mjs'
 import { admitResume, applyResume } from '../../lib/engine/records.mjs'
+import { treeFingerprint } from '../../lib/workspace/fingerprint.mjs'
 import { create, engineEnv, flagValue, invocations, protocolEvents, readJson, run, storeJournal } from './_engine.mjs'
 
 const TARGET = 'In <PROJECT_ROOT> convert data.csv to JSON.'
@@ -54,6 +55,9 @@ describe('deep lineage', () => {
     // Only the CLAIM/PROBE pairs reached the Verifier, as NOT_RUN leads; the narrative never did.
     const inspections = e.observations().filter(o => o.kind === 'inspect' && o.ep === 'p001')
     assert.deepEqual(inspections.map(o => [o.gen, o.leads, o.narrativeLeak, o.originalFixtures]), [[1, false, false, true], [2, true, false, true]])
+    // prompts-2: both practice inspections replayed the capture at the Actor's own root.
+    for (const o of inspections) assert.equal(o.cwd, e.layout('d1').projectRoot('p001'))
+    assert.equal(result.candidate_changed_after_verdict, false)
     const verifierPrompts = await promptsOf(e, dir, 'p001/b/a1/verifier')
     assert.match(verifierPrompts[1], /Harness execution classification: NOT_RUN/)
     assert.match(verifierPrompts[1], /test -f out\.txt && echo PASS/)
@@ -113,8 +117,11 @@ describe('deep lineage', () => {
     const verifiers = invocations(e, 'verifier')
     assert.deepEqual(verifiers.map(i => flagValue(i.argv, '--model')), ['verifier-model', 'actor-model'])
     assert.notEqual(verifiers[0].sessionId, verifiers[1].sessionId)
-    const swapped = e.observations().filter(o => o.kind === 'inspect')[1]
+    const [original, swapped] = e.observations().filter(o => o.kind === 'inspect')
     assert.equal(swapped.handoverReports, false) // J1-10: no history and no prior reports by default
+    // protocol-6: the fresh second-model context is told it is fresh, never that it has prior investigations.
+    assert.deepEqual([original.otherVerifier, original.priorInvestigations], [false, true])
+    assert.deepEqual([swapped.gen, swapped.otherVerifier, swapped.priorInvestigations], [2, true, false])
     const events = await protocolEvents(dir)
     const resumedEvent = events.find(ev => ev.type === 'TARGET_RESUMED')
     assert.deepEqual([resumedEvent.mode, resumedEvent.escalated, resumedEvent.verifierSwapped], ['handoff', true, true])
@@ -188,7 +195,10 @@ describe('deep lineage', () => {
   })
 
   it('never learns an UNVERIFIED target and ends target_harness_unverified', async () => {
-    const e = await engineEnv({ world: { verdicts: { '*': ['UNVERIFIED'] } }, config: { exploration: { targetResumes: 0, unverifiedRounds: 2 } } })
+    const e = await engineEnv({
+      world: { verdicts: { '*': ['UNVERIFIED'] }, actors: { t001: { evidenceNoAction: true } } },
+      config: { exploration: { targetResumes: 0, unverifiedRounds: 2 } },
+    })
     const { dir } = await create(e, { phase: 'deep', id: 'd8', target: TARGET })
     await run(e, dir)
     const result = readJson(join(dir, 'result.json'))
@@ -197,6 +207,62 @@ describe('deep lineage', () => {
     assert.equal((await storeJournal(e)).journal.length, 0)
     const verified = (await protocolEvents(dir)).filter(ev => ev.type === 'TARGET_VERIFIED')
     assert.deepEqual(verified.map(ev => [ev.generation, ev.forced]), [[1, false], [2, false], [3, true]])
+  })
+
+  it('stalls hollow UNVERIFIED re-submissions at unverifiedRounds, but evidence work only at the emergency ceiling (protocol-3)', async () => {
+    const stalledAt = async (id, actorConf) => {
+      const e = await engineEnv({ world: { verdicts: { '*': ['UNVERIFIED'] }, actors: { t001: actorConf } }, config: { exploration: { targetResumes: 0 } } })
+      const { dir } = await create(e, { phase: 'deep', id, target: TARGET })
+      await run(e, dir)
+      const result = readJson(join(dir, 'result.json'))
+      assert.equal(result.termination, 'target_harness_unverified')
+      assert.equal((await storeJournal(e)).journal.length, 0)
+      const events = await protocolEvents(dir)
+      return {
+        reasons: events.filter(ev => ev.type === 'TARGET_STALLED').map(ev => ev.reason),
+        verified: events.filter(ev => ev.type === 'TARGET_VERIFIED').map(ev => [ev.generation, ev.forced]),
+      }
+    }
+    // RSIAgent max_consec_done: re-declarations without any tool action stall at the 3rd UNVERIFIED.
+    const hollow = await stalledAt('d13', { evidenceNoAction: true })
+    assert.deepEqual(hollow.reasons, ['3 consecutive UNVERIFIED rounds'])
+    assert.deepEqual(hollow.verified, [[1, false], [2, false], [3, false], [4, true]])
+    // Every evidence round acted (wrote evidence.txt): the count resets; only the emergency ceiling (8) stalls.
+    const working = await stalledAt('d14', {})
+    assert.deepEqual(working.reasons, ['emergency ceiling: 8 UNVERIFIED rounds in one Actor context'])
+    assert.deepEqual(working.verified, [...Array.from({ length: 8 }, (_, i) => [i + 1, false]), [9, true]])
+  })
+
+  it('reports the verified tree as the final candidate even when the Actor rewrote its root while learning (protocol-1)', async () => {
+    const e = await engineEnv({ world: { actors: { t001: { learnWritesRoot: true } } }, config: { exploration: { stopPolicy: 'verifier_pass' } } })
+    const { dir } = await create(e, { phase: 'deep', id: 'd15', target: TARGET })
+    assert.equal((await run(e, dir)).status, 'completed')
+    const result = readJson(join(dir, 'result.json'))
+    assert.deepEqual([result.termination, result.target_verifier_verdict], ['verifier_pass', 'PASS'])
+    const root = e.layout('d15').projectRoot('t001')
+    assert.equal(readFileSync(join(root, 'out.txt'), 'utf8'), 'REWRITTEN AFTER THE VERDICT\n') // the live root changed after the PASS
+    assert.equal(result.candidate_changed_after_verdict, true)
+    // The candidate copy (what a sealed evaluation scores) is the tree the Verifier inspected.
+    assert.equal(readFileSync(join(result.candidate_copy, 'tree', 'out.txt'), 'utf8'), 'result for t001\n')
+    assert.equal(await treeFingerprint(join(result.candidate_copy, 'tree')), result.candidate_digest)
+    const j = await OpJournal.open(dir)
+    assert.equal(j.result('t001/g1/pre').fp, j.result('t001/verified-candidate').rootFp)
+    assert.equal(result.candidate_digest, j.result('t001/verified-candidate').digest)
+    assert.equal(readFileSync(join(e.layout('d15').priv, 't001', 'verified-candidate', 'tree', 'out.txt'), 'utf8'), 'result for t001\n')
+  })
+
+  it('reports only the decision that ended the last evolution as curriculum_decision (protocol-9)', async () => {
+    const e = await engineEnv({
+      world: { verdicts: { t001: ['FAIL'], '*': ['PASS'] }, deepPlan: { 1: ['READY_FOR_TARGET'], 2: ['PROJECT', 'PROJECT', 'PROJECT'] } },
+      config: { exploration: { deepPracticeBudget: 2 } },
+    })
+    const { dir } = await create(e, { phase: 'deep', id: 'd16', target: TARGET })
+    await run(e, dir)
+    const result = readJson(join(dir, 'result.json'))
+    assert.deepEqual([result.termination, result.target_verifier_verdict, result.target_cycles], ['budget_exhausted', 'PASS', 3])
+    const decided = (await protocolEvents(dir)).filter(ev => ev.type === 'CURRICULUM_DECIDED').map(ev => ev.decision)
+    assert.deepEqual(decided, ['READY_FOR_TARGET', 'PROJECT', 'PROJECT'])
+    assert.equal(result.curriculum_decision, null) // the last evolution was cut off by the budget, not judged ready
   })
 
   it('pauses on practice UNVERIFIED exhaustion and grants one more evidence round on resume', async () => {

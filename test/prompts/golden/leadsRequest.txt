@@ -4,6 +4,7 @@
 EVIDENCE LEADS: end your turn with a new handoff as your final message: the line STATUS: SUBMIT on a line of its own, followed by one block per unconfirmed requirement:
 CLAIM: <the requirement the probe demonstrates, on one line>
 PROBE: <one exact read-only shell command on one line; the Verifier can re-run it and it prints PASS only when the claim holds>
+Start each CLAIM: and PROBE: line with its label, as plain text (no bullet, number or bold) outside any code block.
 A probe that needs several lines goes in a fenced code block right after an empty PROBE: line. Only these
 CLAIM/PROBE pairs reach the Verifier; any other text in your message is not forwarded. The harness does not
 run the probes: the Verifier reproduces or falsifies them with its own instruments.

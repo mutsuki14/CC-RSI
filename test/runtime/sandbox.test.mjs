@@ -2,10 +2,10 @@
 // live probe against the fake claude (which emulates the f2 gate and runs Bash unconfined).
 
 import assert from 'node:assert/strict'
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { decideIsolation, effectiveProbe, liveProbe, probeRecord, readProbe, recordLiveResult, staticProbe, writeProbe } from '../../lib/runtime/sandbox.mjs'
+import { decideIsolation, effectiveProbe, liveProbe, probeRecord, readProbe, recordLiveResult, shellQuote, staticProbe, writeProbe } from '../../lib/runtime/sandbox.mjs'
 import { fakeClaude } from '../_helpers/fake.mjs'
 import { tmpDir, tmpHome } from '../_helpers/tmp.mjs'
 
@@ -83,18 +83,65 @@ test('liveProbe: the f2 gate (no model call) → unavailable', async () => {
   assert.equal(fake.log().length, 1)
 })
 
-test('liveProbe: a sandbox that starts but does not confine is reported as not enforced', async () => {
-  const { home } = await tmpHome()
+/** A fake-claude scenario whose body maps the prompt's `touch …` line (`line`) to a reply. */
+async function probeScenario(body) {
   const dir = await tmpDir()
   const scenario = join(dir, 'touch.mjs')
   writeFileSync(scenario, `export default async function respond(ctx) {
     const line = ctx.prompt.split('\\n').find(l => l.startsWith('touch '))
-    return { actions: [{ tool: 'Bash', command: line }], text: 'DONE' }
+    ${body}
   }\n`)
+  return scenario
+}
+
+/** A CC_RSI_HOME whose path contains a space, a quote and non-ASCII letters (portability-4). */
+async function awkwardHome() {
+  const home = join(await tmpDir(), "home dir \u00e9 it's")
+  mkdirSync(home, { recursive: true })
+  return home
+}
+
+test('shellQuote: one POSIX word for any path', () => {
+  assert.equal(shellQuote('/a/b'), "'/a/b'")
+  assert.equal(shellQuote("/x y/it's $HOME"), "'/x y/it'\\''s $HOME'")
+})
+
+test('liveProbe: a sandbox that starts but does not confine is reported as not enforced', async () => {
+  const { home } = await tmpHome()
+  const scenario = await probeScenario("return { actions: [{ tool: 'Bash', command: line }], text: 'DONE' }")
   const fake = await fakeClaude({ home, scenario, sandbox: 'available' })
   const r = await liveProbe({ bin: fake.bin, home, env: fake.env })
   assert.deepEqual({ available: r.available, enforced: r.enforced }, { available: true, enforced: false })
   const log = fake.log()
   assert.equal(log.length, 1)
   assert.ok(log[0].argv.includes('--settings'))
+})
+
+test('liveProbe: a home path with spaces still detects a non-confining sandbox (quoted paths)', async () => {
+  const home = await awkwardHome()
+  const scenario = await probeScenario("return { actions: [{ tool: 'Bash', command: line }], text: 'DONE' }")
+  const fake = await fakeClaude({ home, scenario, sandbox: 'available' })
+  const r = await liveProbe({ bin: fake.bin, home, env: fake.env })
+  assert.deepEqual({ available: r.available, enforced: r.enforced, inconclusive: r.inconclusive }, { available: true, enforced: false, inconclusive: undefined })
+})
+
+test('liveProbe: enforced only when the control write inside the allowed directory succeeded', async () => {
+  const home = await awkwardHome()
+  // Emulates a confining sandbox: the shell parses the touch line, but only its first (allowed) operand is written.
+  const scenario = await probeScenario("return { actions: [{ tool: 'Bash', command: line.replace(/^touch /, 'set -- ') + '; touch \"$1\"' }], text: 'DONE' }")
+  const fake = await fakeClaude({ home, scenario, sandbox: 'available' })
+  const r = await liveProbe({ bin: fake.bin, home, env: fake.env })
+  assert.deepEqual({ available: r.available, enforced: r.enforced }, { available: true, enforced: true })
+  assert.match(r.reason, /confined a write outside its allowed directory/)
+})
+
+test('liveProbe: a model that replies DONE without running the command is inconclusive, not enforced', async () => {
+  const { home } = await tmpHome()
+  const scenario = await probeScenario("return { text: 'DONE' }")
+  const fake = await fakeClaude({ home, scenario, sandbox: 'available' })
+  const r = await liveProbe({ bin: fake.bin, home, env: fake.env })
+  assert.equal(r.inconclusive, true)
+  assert.equal(r.enforced, null)
+  assert.equal(r.cls, 'probe_not_run')
+  assert.match(r.reason, /inconclusive/)
 })

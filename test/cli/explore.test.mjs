@@ -4,7 +4,8 @@
 // never print report text; stop → resume; abandon (human-only). Skipped when lib/engine is absent.
 
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, describe, it } from 'node:test'
@@ -191,5 +192,62 @@ describe('cc-rsi explore', { skip }, () => {
     assert.deepEqual([result.termination, result.rationale], ['abandoned', 'operator decision'])
     const notRunning = await s.run(['explore', 'stop', 'b3'])
     assert.match(notRunning.stdout, /is not running/)
+  })
+})
+
+describe('cc-rsi explore stop after a hostname change (portability-7)', () => {
+  /** A lineage whose engine lease names another hostname, held by a live local stand-in engine. */
+  async function renamedHost({ cmdline = 'daemon' } = {}) {
+    const { home, env } = await tmpHome()
+    for (const name of Object.keys(env)) if (name.startsWith('CC_RSI_') || name.startsWith('CLAUDE_PLUGIN_')) delete env[name]
+    env.CC_RSI_HOME = home
+    env.CLAUDE_CONFIG_DIR = await tmpDir('cc-rsi-claude-config-')
+    const repo = await gitRepo({ 'README.md': 'project\n' })
+    const pl = projectLayout(home, projectKey(await gitProjectRoot(repo)))
+    const id = '20261013-000000-abcd'
+    const dir = lineageLayout(pl, id).dir
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'lineage.json'), JSON.stringify({ v: 1, id, phase: 'broad' }))
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ v: 1, id, phase: 'broad', status: 'running' }))
+    const bin = await tmpDir('cc-rsi-engine-')
+    mkdirSync(join(bin, 'lib', 'engine'), { recursive: true })
+    const script = cmdline === 'daemon' ? join(bin, 'lib', 'engine', 'daemon.mjs') : join(bin, 'cc-rsi-tool.mjs')
+    writeFileSync(script, `
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const dir = process.argv[2]
+process.on('SIGTERM', () => {
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ v: 1, status: 'paused_user', pausedAt: new Date().toISOString() }))
+  process.exit(0)
+})
+setInterval(() => {}, 1000)
+`)
+    const child = spawn(process.execPath, [script, dir], { detached: true, stdio: 'ignore' })
+    spawnedPids.add(child.pid)
+    await sleep(300)
+    // Written moments ago by this machine under its previous name: the lease is live.
+    writeFileSync(join(dir, 'engine.lock'), `${JSON.stringify({ pid: child.pid, host: 'Johns-MacBook-Pro.local', token: 'other-process:1', at: new Date().toISOString() })}\n`)
+    const run = async argv => {
+      const out = []
+      const code = await main(argv, { stdout: { write: x => out.push(x), isTTY: false }, stderr: { write: x => out.push(x) }, env, cwd: repo, isTTY: false })
+      return { code, text: out.join('') }
+    }
+    return { id, dir, child, run }
+  }
+
+  it('stops its own engine when the lease names an older hostname of this machine', async () => {
+    const s = await renamedHost()
+    const r = await s.run(['explore', 'stop', s.id, '--timeout', '10'])
+    assert.equal(r.code, 0, r.text)
+    assert.match(r.text, /sent SIGTERM to the engine of lineage/)
+    assert.match(r.text, /paused_user/)
+  })
+
+  it('still refuses a lease of another host when the local pid is not that engine', async () => {
+    const s = await renamedHost({ cmdline: 'other' })
+    const r = await s.run(['explore', 'stop', s.id, '--timeout', '1'])
+    assert.equal(r.code, 3, r.text)
+    assert.match(r.text, /runs on host Johns-MacBook-Pro\.local .*stop it there\. If this machine was renamed, check pid \d+/)
+    assert.doesNotThrow(() => process.kill(s.child.pid, 0), 'nothing was signalled')
   })
 })

@@ -44,7 +44,7 @@ async function world(policyExtra = {}) {
     writeRoots: [dirs.cwd],
     readOnlyRoots: [dirs.memdir],
     hidden: [dirs.curriculum, dirs.verify, dirs.other, join(dirs.home, 'projects'), join(dirs.userHome, '.claude', 'projects')],
-    hiddenTokens: ['curriculum-private', 'verify-scratch', '/verify/', '/.cc-rsi/projects', '.claude/projects'],
+    hiddenTokens: ['curriculum-private', 'verify-scratch', '../../verify', '/.cc-rsi/projects', '.claude/projects'],
     allowedPaths: [dirs.cwd, dirs.memdir],
     bashDeny: [],
     recursionGuard: true,
@@ -173,6 +173,27 @@ test('Bash: hidden paths, ~ and $HOME spellings, relative traversal and hidden t
   for (const command of allowed) assert.equal(decisionOf(await w.tool('Bash', { command })), 'pass', command)
 })
 
+test('Bash: globbed hidden paths and tree walks rooted above a hidden root are denied like Grep/Glob (security-6)', async () => {
+  const w = await world()
+  const walks = ['grep -rn VERDICT ~', 'find .. -name secret.txt', 'ls -R ..', 'cd .. && grep -r OTHER .', 'du -a ../..', 'bash -c "grep -r OTHER .."',
+    'find ~ -name "*.jsonl" 2>/dev/null']
+  for (const command of walks) {
+    const r = await w.tool('Bash', { command })
+    assert.equal(decisionOf(r), 'deny', command)
+    assert.match(reasonOf(r), /contains a harness-private path hidden from this role; narrow the search path/, command)
+  }
+  const globs = ['cat ~/.cl*/projects/x.jsonl', 'cat ../w00[2]/secret.txt', 'cat ../*/secret.txt', 'cat ../w00?/secret.txt', `cat ${w.dirs.home}/proj*/k/x`,
+    'cat ../{w002,w003}/secret.txt']
+  for (const command of globs) {
+    const r = await w.tool('Bash', { command })
+    assert.equal(decisionOf(r), 'deny', command)
+    assert.match(reasonOf(r), /is a harness-private path hidden from this role; it is not candidate evidence/, command)
+  }
+  for (const command of ['grep -r print .', 'find . -name "*.py"', 'ls *.py', 'ls -R .', 'cat ./*.py', 'du -sh .', 'rm -rf ./* ./.[!.]* 2>/dev/null; true']) {
+    assert.equal(decisionOf(await w.tool('Bash', { command })), 'pass', command)
+  }
+})
+
 test('Bash: allowedPaths are masked before the token check', async () => {
   const own = join('/x/W', 'verify', 'w001', 'candidate')
   const w = await world({ role: 'verifier', allowedPaths: [own], hiddenTokens: ['/verify/'], hidden: [], readRoots: [own] })
@@ -197,7 +218,7 @@ test('Bash: recursion into Claude Code or cc-rsi is refused', async () => {
 test('Bash: the external-mutation patterns of a non-sandboxed Verifier', async () => {
   const w = await world({ role: 'verifier', bashDeny: MUTATION_BASH_DENY })
   for (const command of ['git push origin main', 'git -C repo push', 'git remote set-url origin x', 'curl -X POST https://api.example.com', 'curl -d a=b https://x',
-    'curl --data @f https://x', 'wget --post-data=a https://x', 'ssh host ls', 'scp a host:b', 'rsync -a . host:/x', 'sudo rm -rf /', 'kill -9 1', 'docker rm c', 'docker container stop c',
+    'curl --data @f https://x', 'wget --post-data=a https://x', 'ssh host ls', 'scp a host:b', 'rsync -a . host:/x', 'sudo apt-get install -y x', 'kill -9 1', 'docker rm c', 'docker container stop c',
     'kubectl delete pod x', 'kubectl apply -f x.yaml']) {
     const r = await w.tool('Bash', { command })
     assert.equal(decisionOf(r), 'deny', command)
@@ -206,6 +227,8 @@ test('Bash: the external-mutation patterns of a non-sandboxed Verifier', async (
   for (const command of ['git status', 'git log -1', 'curl https://example.com', 'curl -s -o out.html https://example.com', 'rsync -a src/ dst/', 'docker ps', 'kubectl get pods']) {
     assert.equal(decisionOf(await w.tool('Bash', { command })), 'pass', command)
   }
+  // Walking `/` reaches every hidden root, so the search-root rule refuses it before the patterns run.
+  assert.match(reasonOf(await w.tool('Bash', { command: 'sudo rm -rf /' })), /narrow the search path/)
 })
 
 test('malformed input and a broken policy fail closed; the guard log is written before output', async () => {

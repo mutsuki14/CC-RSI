@@ -71,6 +71,17 @@ describe('loadConfig precedence', () => {
     assert.equal(sources['interactive.stopPolicy'], 'default')
   })
 
+  it('exploration.unverifiedCeiling is a known key (default 8; protocol-3 emergency ceiling)', async () => {
+    assert.equal(DEFAULTS.exploration.unverifiedCeiling, 8)
+    const { home, projectRoot } = await setup({ global: { exploration: { unverifiedCeiling: 5 } } })
+    const { config, warnings } = loadConfig({ home, projectRoot })
+    assert.equal(config.exploration.unverifiedCeiling, 5)
+    assert.deepEqual(warnings, [])
+    const bad = await setup({ global: { exploration: { unverifiedCeiling: 0 } } })
+    const out = loadConfig({ home: bad.home, projectRoot: bad.projectRoot })
+    assert.equal(out.config.exploration.unverifiedCeiling, 8, 'an out-of-range value falls back to the default')
+  })
+
   it('accepts dotted keys in CLI and userConfig layers', async () => {
     const { config } = loadConfig({ cli: { 'exploration.waveConcurrency': 4 }, userConfig: { stop_policy: 'gate', sandbox: 'require' } })
     assert.equal(config.exploration.waveConcurrency, 4)
@@ -104,6 +115,26 @@ describe('loadConfig precedence', () => {
     }
     // The CLI may still set them.
     assert.equal(loadConfig({ home, projectRoot, cli: { memory: { dir: '/cli' } } }).config.memory.dir, '/cli')
+  })
+
+  it('the project file cannot weaken the exam-fence audit; lowering the rollback caps is warned about (security-11)', async () => {
+    const { home, projectRoot } = await setup({
+      project: { audit: { shingleWords: 1000000 }, interactive: { checkpointMaxBytes: 0, checkpointMaxFiles: 50000 } },
+    })
+    const { config, warnings } = loadConfig({ home, projectRoot })
+    assert.equal(config.audit.shingleWords, 8)
+    assert.ok(warnings.some(w => w.includes('"audit.shingleWords"')), warnings.join('\n'))
+    assert.ok(GLOBAL_ONLY.includes('audit'))
+    // A value from a project file is honoured but warned about when it lowers a rollback cap.
+    assert.equal(config.interactive.checkpointMaxBytes, 0)
+    assert.equal(config.interactive.checkpointMaxFiles, 50000)
+    assert.ok(warnings.some(w => w.includes('"interactive.checkpointMaxBytes" = 0') && w.includes('detect-only')))
+    assert.ok(!warnings.some(w => w.includes('"interactive.checkpointMaxFiles"')))
+    // Even the global file and the CLI are bounded: a shingle longer than 16 words would never match.
+    assert.equal(loadConfig({ cli: { audit: { shingleWords: 17 } } }).config.audit.shingleWords, 8)
+    assert.equal(loadConfig({ cli: { audit: { shingleWords: 16 } } }).config.audit.shingleWords, 16)
+    const global = await setup({ global: { audit: { shingleWords: 12 } } })
+    assert.equal(loadConfig(global).config.audit.shingleWords, 12)
   })
 
   it('tighten-only: the project cannot loosen the sandbox, but can tighten it', async () => {
