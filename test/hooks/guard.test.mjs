@@ -433,6 +433,25 @@ describe('main-session guard: Verifier transcripts, plugin code, external store'
     for (const command of allowed) assert.equal(humanOnlyIn(command), false, command)
   })
 
+  it('judges a command that clears CLAUDECODE by the conservative text test too (r3-guard-hooks-4)', async () => {
+    // The cc-rsi command word comes from a command substitution, so the parsed words miss it; the
+    // CLI's own refusal is gone because CLAUDECODE is cleared.
+    const denied = ['env -u CLAUDECODE "$(command -v cc-rsi)" memory unfreeze', 'env -u CLAUDECODE $(which cc-rsi) memory unfreeze',
+      'env -u CLAUDECODE `which cc-rsi` eval run --fixtures x', 'unset CLAUDECODE; "$(command -v cc-rsi)" explore abandon',
+      'CLAUDECODE= "$(command -v cc-rsi)" verify cancel', 'env -u CLAUDECODE "$(command -v cc-rsi)" explore start --phase broad']
+    for (const command of denied) assert.equal(humanOnlyIn(command), true, command)
+    assert.equal(humanOnlyIn('env -u CLAUDECODE "$(command -v cc-rsi)" explore start --phase broad', { modelMayStart: true }), false)
+    // Clearing the variable alone, or free text without clearing it, is not refused.
+    const allowed = ['env -u CLAUDECODE npm test', 'CLAUDECODE=1 node test.mjs', 'echo "$CLAUDECODE"', 'env -u CLAUDECODE "$(command -v cc-rsi)" status',
+      'git commit -m "cc-rsi: cancel now releases the lock"', 'echo "$(command -v cc-rsi)" memory unfreeze']
+    for (const command of allowed) assert.equal(humanOnlyIn(command), false, command)
+    const p = await setupProject()
+    await started(p)
+    const r = await hook('guard', pre(p, 'Bash', { command: denied[0] }), p.env)
+    assert.equal(decision(r), 'deny')
+    assert.match(reason(r), /human-only/)
+  })
+
   it('starts the recovery of a job that died with its checkpoint open and explains the wait (memory-crash-2)', async () => {
     const p = await setupProject()
     const { g, sl } = await started(p)
